@@ -1,0 +1,27 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Coverage and profiling
+*.profraw
+*.profdata
+lcov.info
+/coverage/
+
+# Snapshot test outputs (accepted snapshots are committed; failures are not)
+**/*.new.png
+**/*.diff.png
+**/*.snap.new
+
+# Local configuration and secrets
+.env
+.env.*
+config.local.toml
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
