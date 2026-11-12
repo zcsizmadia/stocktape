@@ -1,0 +1,37 @@
+schema = 1
+name = "Daylight"
+description = "Light and airy, with the percent change in a colored pill."
+extends = "classic-dark"
+
+[tokens]
+paper = "#FFFFFF"
+ink = "#111827"
+ink2 = "#374151"
+green = "#15803D"
+red = "#B91C1C"
+gray = "#6B7280"
+hairline = "#E5E7EB"
+
+[banner]
+height = 52
+background = "$paper"
+padding = 20
+
+[text]
+size = 20
+color = "$ink"
+
+[symbol]
+weight = 700
+
+[price]
+color = "$ink2"
+
+[change]
+show = false
+
+[percent]
+size = 14
+
+[badge]
+enabled = true

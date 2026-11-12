@@ -6,10 +6,15 @@
 
 use std::error::Error;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use stocktape_core::SystemClock;
+use stocktape_render::BannerStyle;
+use stocktape_skin::SkinLibrary;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -32,13 +37,87 @@ struct Banner {
     next_frame: Instant,
 }
 
+/// Watches a skins folder and reports when anything in it changes.
+struct SkinWatch {
+    dir: PathBuf,
+    events: Receiver<notify::Result<notify::Event>>,
+    // Dropping the watcher stops the notifications.
+    _watcher: RecommendedWatcher,
+}
+
+impl SkinWatch {
+    fn new(dir: PathBuf) -> Result<Self, Box<dyn Error>> {
+        let (tx, events) = channel();
+        let mut watcher = notify::recommended_watcher(tx)?;
+        watcher.watch(&dir, RecursiveMode::NonRecursive)?;
+        Ok(Self {
+            dir,
+            events,
+            _watcher: watcher,
+        })
+    }
+
+    /// Whether any change arrived since the last call.
+    fn changed(&self) -> bool {
+        let mut changed = false;
+        while let Ok(event) = self.events.try_recv() {
+            changed |= event.is_ok_and(|e| !e.kind.is_access());
+        }
+        changed
+    }
+}
+
 struct App {
     clock: SystemClock,
+    style: BannerStyle,
+    skin: String,
+    watch: Option<SkinWatch>,
     banner: Option<Banner>,
     error: Option<Box<dyn Error>>,
 }
 
 impl App {
+    /// Re-reads the skins folder and restyles the banner. On error the current
+    /// look stays and the problem is printed, so a half-typed edit never
+    /// closes the app.
+    fn reload_skin(&mut self) {
+        let Some(watch) = &self.watch else { return };
+        if !watch.changed() {
+            return;
+        }
+        let mut library = SkinLibrary::builtin();
+        let result = library
+            .load_dir(&watch.dir)
+            .map_err(|e| e.to_string())
+            .and_then(|_| library.resolve(&self.skin).map_err(|e| e.to_string()));
+        match result {
+            Ok(skin) => {
+                self.style = BannerStyle::from(&skin);
+                eprintln!("reloaded skin `{}`", skin.id);
+                if let Some(banner) = &mut self.banner {
+                    banner.ticker.set_style(self.style.clone());
+                    let width = banner.window.inner_size().width;
+                    let height = banner.ticker.height_px();
+                    let _ = banner
+                        .window
+                        .request_inner_size(PhysicalSize::new(width, height));
+                    if let (Ok(pos), Some(monitor)) = (
+                        banner.window.outer_position(),
+                        banner.window.current_monitor(),
+                    ) {
+                        let bottom = monitor.position().y
+                            + i32::try_from(monitor.size().height.saturating_sub(height))
+                                .unwrap_or(0);
+                        banner
+                            .window
+                            .set_outer_position(PhysicalPosition::new(pos.x, bottom));
+                    }
+                }
+            }
+            Err(e) => eprintln!("skin not reloaded: {e}"),
+        }
+    }
+
     fn create_banner(&self, event_loop: &ActiveEventLoop) -> Result<Banner, Box<dyn Error>> {
         let monitor = event_loop
             .primary_monitor()
@@ -46,7 +125,7 @@ impl App {
             .ok_or("no display found")?;
         #[allow(clippy::cast_possible_truncation)]
         let scale = monitor.scale_factor() as f32;
-        let ticker = Ticker::demo(seed(), SPEED, scale, &self.clock);
+        let ticker = Ticker::demo(seed(), SPEED, scale, self.style.clone(), &self.clock);
         let height = ticker.height_px();
         let size = monitor.size();
         let position = monitor.position();
@@ -146,6 +225,7 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.reload_skin();
         // Redraw only when a frame is due; requesting a redraw on every wake-up
         // would spin the event loop at full CPU.
         if let Some(banner) = &mut self.banner {
@@ -173,10 +253,24 @@ fn seed() -> u64 {
 
 /// Opens the demo banner and runs until it is closed (Esc or the window
 /// manager's close).
-pub fn run() -> Result<(), Box<dyn Error>> {
+///
+/// `skin` defaults to the library's default; with `skins_dir`, edits to the
+/// files there restyle the banner live.
+pub fn run(
+    library: SkinLibrary,
+    skin: Option<String>,
+    skins_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn Error>> {
+    let skin = skin.unwrap_or_else(|| SkinLibrary::DEFAULT.to_owned());
+    // Fail before opening a window if the skin is broken.
+    let style = BannerStyle::from(&library.resolve(&skin)?);
+    let watch = skins_dir.map(SkinWatch::new).transpose()?;
     let event_loop = EventLoop::new()?;
     let mut app = App {
         clock: SystemClock::new(),
+        style,
+        skin,
+        watch,
         banner: None,
         error: None,
     };

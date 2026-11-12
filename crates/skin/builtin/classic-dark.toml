@@ -1,0 +1,80 @@
+# Classic Dark: the reference skin. Every other built-in skin extends it, so
+# it sets every value. Copy this file into your skins folder to start a new
+# skin, or write a small file with `extends = "classic-dark"` that overrides
+# only what changes.
+
+schema = 1
+name = "Classic Dark"
+description = "Two-tier broadcast look: navy belt, white symbols, green and red moves."
+
+# Named colors. Any color below can say "$name" to use one of these. A skin
+# that extends this one can redefine a token and everything using it follows.
+[tokens]
+navy = "#0E1A2F"
+white = "#FFFFFF"
+mist = "#DCE3EE"
+gray = "#9AA4B5"
+green = "#34D399"
+red = "#F87171"
+hairline = "#FFFFFF14"
+
+[banner]
+height = 56        # logical pixels
+background = "$navy"
+padding = 22       # space at both ends of each quote
+spacing = 10       # space between the parts of a quote
+baseline = 0.64    # text baseline, as a fraction of the height from the top
+
+# Defaults for every text element below.
+[text]
+family = "Inter"   # bundled: "Inter", "JetBrains Mono"
+size = 24
+weight = 400       # 400 regular, 700 bold, 800 extra bold
+color = "$white"
+
+[symbol]
+weight = 800
+
+[price]
+color = "$mist"
+
+[change]
+show = true
+arrow = true       # ▲ / ▼ before the change
+size = 19
+weight = 700
+
+[percent]
+show = true
+size = 15
+weight = 700
+
+# Colors for moves; used by the arrow, change, percent and sparkline.
+[colors]
+up = "$green"
+down = "$red"
+flat = "$gray"
+
+[separator]
+color = "$hairline"
+width = 1          # zero for none
+
+# A pill behind the percent change.
+[badge]
+enabled = false
+up_bg = "#DCFCE7"
+up_fg = "#166534"
+down_bg = "#FEE2E2"
+down_fg = "#991B1B"
+flat_bg = "#E5E7EB"
+flat_fg = "#374151"
+radius = 999       # clamped to half the pill height
+padding_x = 8
+padding_y = 3
+
+# A small intraday price line after the price.
+[sparkline]
+enabled = false
+width = 48
+height = 20
+stroke = 2

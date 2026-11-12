@@ -1,9 +1,9 @@
 //! Quote segments: the text of one quote, measured and drawn on the CPU.
 //!
-//! Each segment is drawn once into an RGBA image, which the GPU compositor
-//! then only has to move. Drawing on the CPU with bundled fonts makes the
-//! output identical on every machine, so it can be checked against reference
-//! images in tests.
+//! Each segment is drawn once into an RGBA image, which the compositor then
+//! only has to move. Drawing on the CPU with bundled fonts makes the output
+//! identical on every machine, so it can be checked against reference images
+//! in tests.
 
 use cosmic_text::fontdb;
 use cosmic_text::{
@@ -12,19 +12,25 @@ use cosmic_text::{
 };
 use stocktape_core::format::{format_change, format_percent, format_price};
 use stocktape_core::{Direction, Quote};
-use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Rect, Transform};
+use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::style::{BannerStyle, Rgba, TextStyle};
 
-const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
-const INTER_BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-Bold.ttf");
-const INTER_EXTRA_BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-ExtraBold.ttf");
+/// Fonts shipped with stocktape (SIL Open Font License; see
+/// `assets/fonts/*-LICENSE.txt`).
+const FONTS: [&[u8]; 5] = [
+    include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+    include_bytes!("../assets/fonts/Inter-Bold.ttf"),
+    include_bytes!("../assets/fonts/Inter-ExtraBold.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf"),
+];
 
-/// The family name of the bundled UI font.
-pub const FONT_FAMILY: &str = "Inter";
+/// Price points kept for a sparkline.
+const SPARK_POINTS: usize = 64;
 
 /// The display text of one quote.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QuoteSegment {
     /// Ticker as shown, e.g. `AAPL`.
     pub symbol: String,
@@ -36,6 +42,8 @@ pub struct QuoteSegment {
     pub percent: String,
     /// Direction, for the arrow and colors.
     pub direction: Direction,
+    /// Recent prices, oldest first, for a sparkline.
+    pub history: Vec<f64>,
 }
 
 impl QuoteSegment {
@@ -54,7 +62,17 @@ impl QuoteSegment {
                 .map(format_percent)
                 .unwrap_or_default(),
             direction: quote.direction(),
+            history: Vec::new(),
         }
+    }
+
+    /// Adds recent prices for a sparkline (only the last few dozen are kept).
+    #[must_use]
+    pub fn with_history<I: IntoIterator<Item = f64>>(mut self, prices: I) -> Self {
+        self.history = prices.into_iter().filter(|p| p.is_finite()).collect();
+        let excess = self.history.len().saturating_sub(SPARK_POINTS);
+        self.history.drain(..excess);
+        self
     }
 }
 
@@ -90,14 +108,29 @@ struct Shaped {
     color: Rgba,
 }
 
-/// A laid-out segment, in physical pixels.
-struct Layout {
-    /// Text pieces with their left edge.
-    pieces: Vec<(f32, Shaped)>,
-    /// Arrow left edge and size, if the segment shows one.
-    arrow: Option<(f32, f32)>,
-    /// Total width.
-    width: f32,
+/// One drawable part of a segment, positioned in physical pixels.
+enum Part {
+    Text {
+        x: f32,
+        shaped: Shaped,
+    },
+    Arrow {
+        x: f32,
+        size: f32,
+    },
+    Pill {
+        x: f32,
+        width: f32,
+        center_y: f32,
+        height: f32,
+        color: Rgba,
+    },
+    Spark {
+        x: f32,
+        width: f32,
+        center_y: f32,
+        height: f32,
+    },
 }
 
 /// Arrow size relative to the change text size.
@@ -106,6 +139,8 @@ const ARROW_SCALE: f32 = 0.55;
 const ARROW_GAP: f32 = 0.3;
 /// Space between change and percent, relative to the spacing.
 const PERCENT_GAP: f32 = 0.6;
+/// Height of the lowercase x relative to the font size, for centering.
+const X_HEIGHT: f32 = 0.36;
 
 impl SegmentRenderer {
     /// Creates a renderer that uses only the bundled fonts, never system
@@ -113,7 +148,7 @@ impl SegmentRenderer {
     #[must_use]
     pub fn new(style: BannerStyle) -> Self {
         let mut db = fontdb::Database::new();
-        for font in [INTER_REGULAR, INTER_BOLD, INTER_EXTRA_BOLD] {
+        for font in FONTS {
             db.load_font_data(font.to_vec());
         }
         Self {
@@ -141,7 +176,7 @@ impl SegmentRenderer {
         // Tabular figures keep prices from wobbling as digits change.
         features.enable(FeatureTag::new(b"tnum"));
         let mut attrs = Attrs::new()
-            .family(Family::Name(FONT_FAMILY))
+            .family(Family::Name(&style.family))
             .weight(Weight(style.weight));
         attrs.font_features = features;
         buffer.set_size(None, None);
@@ -166,56 +201,100 @@ impl SegmentRenderer {
         }
     }
 
-    /// Lays out a segment at `scale` and returns its pieces and total width in
-    /// physical pixels.
-    fn layout(&mut self, segment: &QuoteSegment, scale: f32) -> Layout {
+    /// Lays out a segment at `scale`: its parts and total width in physical
+    /// pixels.
+    fn layout(&mut self, segment: &QuoteSegment, scale: f32) -> (Vec<Part>, f32) {
         let style = self.style.clone();
         let accent = self.direction_color(segment.direction);
-        let mut pieces = Vec::new();
+        let baseline = style.height * style.baseline * scale;
+        let mut parts = Vec::new();
         let mut x = style.padding * scale;
 
         let symbol = self.shape(&segment.symbol, &style.symbol, style.symbol.color, scale);
         let w = symbol.width;
-        pieces.push((x, symbol));
+        parts.push(Part::Text { x, shaped: symbol });
         x += w + style.spacing * scale;
 
         let price = self.shape(&segment.price, &style.price, style.price.color, scale);
         let w = price.width;
-        pieces.push((x, price));
+        parts.push(Part::Text { x, shaped: price });
         x += w;
 
-        let mut arrow = None;
-        if !segment.change.is_empty() {
+        if let Some(spark) = &style.sparkline {
             x += style.spacing * scale;
-            if segment.direction != Direction::Flat {
-                let size = style.change.size * ARROW_SCALE * scale;
-                arrow = Some((x, size));
-                x += size + style.change.size * ARROW_GAP * scale;
+            let center_y = baseline - style.price.size * X_HEIGHT * scale;
+            parts.push(Part::Spark {
+                x,
+                width: spark.width * scale,
+                center_y,
+                height: spark.height * scale,
+            });
+            x += spark.width * scale;
+        }
+
+        let mut shown_change = false;
+        if let Some(change_style) = style.change.as_ref().filter(|_| !segment.change.is_empty()) {
+            shown_change = true;
+            x += style.spacing * scale;
+            if style.arrow && segment.direction != Direction::Flat {
+                let size = change_style.size * ARROW_SCALE * scale;
+                parts.push(Part::Arrow { x, size });
+                x += size + change_style.size * ARROW_GAP * scale;
             }
-            let change = self.shape(&segment.change, &style.change, accent, scale);
+            let change = self.shape(&segment.change, change_style, accent, scale);
             let w = change.width;
-            pieces.push((x, change));
+            parts.push(Part::Text { x, shaped: change });
             x += w;
         }
-        if !segment.percent.is_empty() {
-            x += style.spacing * PERCENT_GAP * scale;
-            let percent = self.shape(&segment.percent, &style.percent, accent, scale);
-            let w = percent.width;
-            pieces.push((x, percent));
-            x += w;
+
+        if let Some(percent_style) = style
+            .percent
+            .as_ref()
+            .filter(|_| !segment.percent.is_empty())
+        {
+            x += if shown_change {
+                style.spacing * PERCENT_GAP * scale
+            } else {
+                style.spacing * scale
+            };
+            if let Some(badge) = &style.badge {
+                let (bg, fg) = match segment.direction {
+                    Direction::Up => badge.up,
+                    Direction::Down => badge.down,
+                    Direction::Flat => badge.flat,
+                };
+                let text = self.shape(&segment.percent, percent_style, fg, scale);
+                let pad_x = badge.padding_x * scale;
+                let height = percent_style.size * scale + badge.padding_y * 2.0 * scale;
+                let center_y = baseline - percent_style.size * X_HEIGHT * scale;
+                let width = text.width + pad_x * 2.0;
+                parts.push(Part::Pill {
+                    x,
+                    width,
+                    center_y,
+                    height,
+                    color: bg,
+                });
+                parts.push(Part::Text {
+                    x: x + pad_x,
+                    shaped: text,
+                });
+                x += width;
+            } else {
+                let percent = self.shape(&segment.percent, percent_style, accent, scale);
+                let w = percent.width;
+                parts.push(Part::Text { x, shaped: percent });
+                x += w;
+            }
         }
         x += style.padding * scale;
-        Layout {
-            pieces,
-            arrow,
-            width: x,
-        }
+        (parts, x)
     }
 
     /// Width of a segment in logical pixels at scale factor `scale`, rounded up
     /// to whole physical pixels.
     pub fn measure(&mut self, segment: &QuoteSegment, scale: f32) -> f64 {
-        let width = self.layout(segment, scale).width;
+        let (_, width) = self.layout(segment, scale);
         f64::from(width.ceil()) / f64::from(scale)
     }
 
@@ -229,12 +308,9 @@ impl SegmentRenderer {
             scale.is_finite() && scale > 0.0,
             "invalid scale factor {scale}"
         );
-        let Layout {
-            pieces,
-            arrow,
-            width,
-        } = self.layout(segment, scale);
+        let (parts, width) = self.layout(segment, scale);
         let style = self.style.clone();
+        let accent = self.direction_color(segment.direction);
         let px_width = width.ceil().max(1.0);
         let px_height = (style.height * scale).ceil().max(1.0);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -243,35 +319,73 @@ impl SegmentRenderer {
         pixmap.fill(to_skia(style.background));
 
         let baseline = style.height * style.baseline * scale;
-        for (x, mut piece) in pieces {
-            let top = baseline - piece.baseline;
-            let color = cosmic_text::Color::rgba(
-                piece.color.r,
-                piece.color.g,
-                piece.color.b,
-                piece.color.a,
-            );
-            let (w, h) = (pixmap.width(), pixmap.height());
-            let data = pixmap.data_mut();
-            piece.buffer.draw(
-                &mut self.fonts,
-                &mut self.glyphs,
-                color,
-                |gx, gy, gw, gh, c| {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let ox = (x + gx as f32).round() as i32;
-                    #[allow(clippy::cast_possible_truncation)]
-                    let oy = (top + gy as f32).round() as i32;
-                    blend_rect(data, w, h, ox, oy, gw, gh, c.as_rgba());
-                },
-            );
-        }
-
-        if let Some((x, size)) = arrow {
-            let color = self.direction_color(segment.direction);
-            // Center the arrow on the lowercase x-height of the change text.
-            let center_y = baseline - style.change.size * 0.36 * scale;
-            draw_arrow(&mut pixmap, x, center_y, size, segment.direction, color);
+        for part in parts {
+            match part {
+                Part::Text { x, mut shaped } => {
+                    let top = baseline - shaped.baseline;
+                    let c = shaped.color;
+                    let color = cosmic_text::Color::rgba(c.r, c.g, c.b, c.a);
+                    let (w, h) = (pixmap.width(), pixmap.height());
+                    let data = pixmap.data_mut();
+                    shaped.buffer.draw(
+                        &mut self.fonts,
+                        &mut self.glyphs,
+                        color,
+                        |gx, gy, gw, gh, c| {
+                            #[allow(clippy::cast_possible_truncation)]
+                            let ox = (x + gx as f32).round() as i32;
+                            #[allow(clippy::cast_possible_truncation)]
+                            let oy = (top + gy as f32).round() as i32;
+                            blend_rect(data, w, h, ox, oy, gw, gh, c.as_rgba());
+                        },
+                    );
+                }
+                Part::Arrow { x, size } => {
+                    let change_size = style.change.as_ref().map_or(0.0, |c| c.size);
+                    let center_y = baseline - change_size * X_HEIGHT * scale;
+                    draw_arrow(&mut pixmap, x, center_y, size, segment.direction, accent);
+                }
+                Part::Pill {
+                    x,
+                    width,
+                    center_y,
+                    height,
+                    color,
+                } => {
+                    let radius = style
+                        .badge
+                        .as_ref()
+                        .map_or(0.0, |b| b.radius * scale)
+                        .min(height / 2.0);
+                    fill_round_rect(
+                        &mut pixmap,
+                        x,
+                        center_y - height / 2.0,
+                        width,
+                        height,
+                        radius,
+                        color,
+                    );
+                }
+                Part::Spark {
+                    x,
+                    width,
+                    center_y,
+                    height,
+                } => {
+                    let stroke = style.sparkline.as_ref().map_or(1.0, |s| s.stroke * scale);
+                    draw_sparkline(
+                        &mut pixmap,
+                        &segment.history,
+                        x,
+                        center_y,
+                        width,
+                        height,
+                        stroke,
+                        accent,
+                    );
+                }
+            }
         }
 
         if style.separator_width > 0.0 {
@@ -287,6 +401,90 @@ impl SegmentRenderer {
             pixmap,
             logical_width: f64::from(px_width) / f64::from(scale),
         }
+    }
+}
+
+fn fill_round_rect(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, r: f32, color: Rgba) {
+    let r = r.max(0.0).min(w / 2.0).min(h / 2.0);
+    // Cubic approximation of a quarter circle.
+    let k = r * 0.552_284_8;
+    let mut p = PathBuilder::new();
+    p.move_to(x + r, y);
+    p.line_to(x + w - r, y);
+    p.cubic_to(x + w - r + k, y, x + w, y + r - k, x + w, y + r);
+    p.line_to(x + w, y + h - r);
+    p.cubic_to(x + w, y + h - r + k, x + w - r + k, y + h, x + w - r, y + h);
+    p.line_to(x + r, y + h);
+    p.cubic_to(x + r - k, y + h, x, y + h - r + k, x, y + h - r);
+    p.line_to(x, y + r);
+    p.cubic_to(x, y + r - k, x + r - k, y, x + r, y);
+    p.close();
+    if let Some(path) = p.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(to_skia(color));
+        paint.anti_alias = true;
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_sparkline(
+    pixmap: &mut Pixmap,
+    prices: &[f64],
+    x: f32,
+    center_y: f32,
+    width: f32,
+    height: f32,
+    stroke: f32,
+    color: Rgba,
+) {
+    if prices.len() < 2 {
+        return;
+    }
+    let (lo, hi) = prices
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+            (lo.min(*p), hi.max(*p))
+        });
+    let range = hi - lo;
+    let inset = stroke / 2.0;
+    let usable = (height - stroke).max(0.0);
+    #[allow(clippy::cast_precision_loss)]
+    let step = (width - stroke) / (prices.len() - 1) as f32;
+    let mut path = PathBuilder::new();
+    for (i, p) in prices.iter().enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
+        let t = if range > 0.0 {
+            ((p - lo) / range) as f32
+        } else {
+            0.5
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let px = x + inset + step * i as f32;
+        let py = center_y + usable / 2.0 - t * usable;
+        if i == 0 {
+            path.move_to(px, py);
+        } else {
+            path.line_to(px, py);
+        }
+    }
+    if let Some(path) = path.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(to_skia(color));
+        paint.anti_alias = true;
+        let stroke = Stroke {
+            width: stroke,
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            ..Stroke::default()
+        };
+        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
 }
 
@@ -487,6 +685,45 @@ mod tests {
                 actual.display()
             );
         }
+    }
+
+    fn history() -> Vec<f64> {
+        (0..48)
+            .map(|i| 236.0 + f64::from(i) * 0.05 + (f64::from(i) * 0.7).sin() * 0.6)
+            .collect()
+    }
+
+    #[test]
+    fn golden_builtin_skins() {
+        let library = stocktape_skin::SkinLibrary::builtin();
+        for id in library.ids() {
+            let skin = library.resolve(id).unwrap();
+            let mut r = SegmentRenderer::new(BannerStyle::from(&skin));
+            let up = sample("AAPL", 238.41, 236.24).with_history(history());
+            let down = sample("TSLA", 431.22, 443.86).with_history(history().into_iter().rev());
+            check_golden(&format!("skin_{id}_up"), &r.draw(&up, 1.0).pixmap);
+            check_golden(&format!("skin_{id}_down"), &r.draw(&down, 1.0).pixmap);
+        }
+    }
+
+    #[test]
+    fn hidden_parts_shrink_the_segment() {
+        let mut full = SegmentRenderer::new(BannerStyle::default());
+        let style = BannerStyle {
+            change: None,
+            percent: None,
+            ..BannerStyle::default()
+        };
+        let mut bare = SegmentRenderer::new(style);
+        let s = sample("AAPL", 238.41, 236.24);
+        assert!(bare.measure(&s, 1.0) < full.measure(&s, 1.0) - 40.0);
+    }
+
+    #[test]
+    fn history_is_trimmed_and_cleaned() {
+        let s = sample("AAPL", 1.0, 1.0).with_history((0..100).map(f64::from).chain([f64::NAN]));
+        assert_eq!(s.history.len(), 64);
+        assert_eq!(s.history[0], 36.0);
     }
 
     #[test]

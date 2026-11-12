@@ -1,0 +1,29 @@
+schema = 1
+name = "Glass"
+description = "Translucent overlay with intraday sparklines."
+extends = "classic-dark"
+
+[tokens]
+smoke = "#0A0E189E"
+silver = "#CBD5E1"
+hairline = "#FFFFFF1A"
+
+[banner]
+height = 60
+background = "$smoke"
+
+[text]
+size = 18
+
+[symbol]
+weight = 700
+
+[price]
+size = 17
+color = "$silver"
+
+[change]
+show = false
+
+[sparkline]
+enabled = true
