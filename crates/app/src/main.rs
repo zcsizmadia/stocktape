@@ -129,8 +129,8 @@ fn config(options: &Options) -> Result<Config, String> {
         (None, None) => Config::preset("bottom")?,
     };
     if let Some(skin) = &options.skin {
-        for banner in &mut config.banners {
-            banner.skin.clone_from(skin);
+        for line in config.banners.iter_mut().flat_map(|b| &mut b.lines) {
+            line.skin.clone_from(skin);
         }
     }
     Ok(config)

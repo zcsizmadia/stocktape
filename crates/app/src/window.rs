@@ -27,7 +27,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::config::{BannerConfig, Config};
-use crate::ticker::{BannerRuntime, Market};
+use crate::ticker::{BannerRuntime, LineSpec, Market};
 
 /// Frame interval when no display reports its refresh rate.
 const DEFAULT_FRAME: Duration = Duration::from_micros(16_667);
@@ -253,16 +253,16 @@ impl App {
         }
         let mut styles = Vec::new();
         for banner in &self.banners {
-            match library.resolve(&banner.config.skin) {
-                Ok(skin) => styles.push(BannerStyle::from(&skin)),
+            match line_styles(&library, &banner.config) {
+                Ok(s) => styles.push(s),
                 Err(e) => {
                     eprintln!("skins not reloaded: {e}");
                     return Ok(());
                 }
             }
         }
-        for (banner, style) in self.banners.iter_mut().zip(styles) {
-            banner.runtime.set_style(style);
+        for (banner, s) in self.banners.iter_mut().zip(styles) {
+            banner.runtime.set_styles(s);
         }
         eprintln!("reloaded skins");
         // Thickness may have changed.
@@ -393,14 +393,17 @@ pub fn run(
         .into_iter()
         .enumerate()
         .map(|(i, config)| {
-            let style = BannerStyle::from(&library.resolve(&config.skin)?);
-            let runtime = BannerRuntime::new(
-                config.strategy,
-                seed + i as u64,
-                config.speed,
-                style,
-                &clock,
-            );
+            let specs: Vec<LineSpec> = config
+                .lines
+                .iter()
+                .zip(line_styles(&library, &config)?)
+                .map(|(line, style)| LineSpec {
+                    strategy: line.strategy,
+                    speed: line.speed,
+                    style,
+                })
+                .collect();
+            let runtime = BannerRuntime::new(&specs, seed + i as u64, &clock);
             Ok(Banner {
                 config,
                 runtime,
@@ -466,4 +469,20 @@ pub fn list_displays() -> Result<(), Box<dyn Error>> {
         );
     }
     Ok(())
+}
+
+/// Resolves the skin of each of a banner's lines, top first.
+fn line_styles(
+    library: &SkinLibrary,
+    config: &BannerConfig,
+) -> Result<Vec<BannerStyle>, stocktape_skin::SkinError> {
+    config
+        .lines
+        .iter()
+        .map(|line| {
+            library
+                .resolve(&line.skin)
+                .map(|skin| BannerStyle::from(&skin))
+        })
+        .collect()
 }

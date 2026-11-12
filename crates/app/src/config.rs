@@ -32,6 +32,17 @@ pub enum StrategyKind {
     Movers,
 }
 
+/// One line of a banner.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineConfig {
+    /// Skin id; its height is the line's thickness.
+    pub skin: String,
+    /// Scroll speed in logical pixels per second.
+    pub speed: f64,
+    /// What it shows.
+    pub strategy: StrategyKind,
+}
+
 /// One banner.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BannerConfig {
@@ -39,14 +50,12 @@ pub struct BannerConfig {
     pub name: String,
     /// Where it goes.
     pub placement: Placement,
-    /// Offset, insets and direction; the thickness comes from the skin.
+    /// Offset, insets and direction; the thickness comes from the lines'
+    /// skins.
     pub options: PlacementOptions,
-    /// Skin id.
-    pub skin: String,
-    /// Scroll speed in logical pixels per second.
-    pub speed: f64,
-    /// What it shows.
-    pub strategy: StrategyKind,
+    /// Lines from top to bottom (never empty). A banner without
+    /// `[[banner.line]]` tables has one line.
+    pub lines: Vec<LineConfig>,
     /// Reserve screen space so other windows stay clear (edge placements;
     /// where the platform supports it).
     pub dock: bool,
@@ -81,6 +90,23 @@ speed = 90
 [[banner]]
 name = "Watchlist"
 place = "bottom"
+"#,
+    ),
+    (
+        "two-tier",
+        "Two lines along the bottom: fast movers above the slower watchlist",
+        r#"[[banner]]
+name = "Two-tier"
+place = "bottom"
+
+[[banner.line]]
+strategy = "movers"
+speed = 180
+
+[[banner.line]]
+skin = "daylight"
+strategy = "watchlist"
+speed = 90
 "#,
     ),
     (
@@ -170,7 +196,7 @@ impl Config {
 
 const KEYS: &[&str] = &[
     "name", "place", "displays", "exclude", "skin", "speed", "offset", "inset", "reverse",
-    "strategy",
+    "strategy", "line",
 ];
 
 fn number(t: &Table, key: &str, default: f64, min: f64, max: f64) -> Result<f64, String> {
@@ -303,15 +329,25 @@ fn banner(t: &Table) -> Result<BannerConfig, String> {
             .as_bool()
             .ok_or_else(|| "`reverse` must be true or false".to_owned())?,
     };
-    let strategy = match string(t, "strategy", "demo")? {
-        "demo" => StrategyKind::Demo,
-        "watchlist" => StrategyKind::Watchlist,
-        "movers" => StrategyKind::Movers,
-        other => {
-            return Err(format!(
-                "`strategy` must be demo, watchlist or movers, not {other:?}"
-            ));
-        }
+    // Banner-level skin, speed and strategy are the defaults for its lines.
+    let default = LineConfig {
+        skin: string(t, "skin", stocktape_skin::SkinLibrary::DEFAULT)?.to_owned(),
+        speed: number(t, "speed", 120.0, 0.0, 5_000.0)?,
+        strategy: strategy(t, StrategyKind::Demo)?,
+    };
+    let lines = match t.get("line") {
+        None => vec![default],
+        Some(Value::Array(list)) if !list.is_empty() => list
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let line = v
+                    .as_table()
+                    .ok_or_else(|| format!("line {} must be a table", i + 1))?;
+                parse_line(line, &default).map_err(|e| format!("line {}: {e}", i + 1))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => return Err("`line` must be one or more [[banner.line]] tables".to_owned()),
     };
     Ok(BannerConfig {
         name: string(t, "name", "Banner")?.to_owned(),
@@ -322,10 +358,35 @@ fn banner(t: &Table) -> Result<BannerConfig, String> {
             reverse,
             ..PlacementOptions::default()
         },
-        skin: string(t, "skin", stocktape_skin::SkinLibrary::DEFAULT)?.to_owned(),
-        speed: number(t, "speed", 120.0, 0.0, 5_000.0)?,
-        strategy,
+        lines,
         dock,
+    })
+}
+
+fn strategy(t: &Table, default: StrategyKind) -> Result<StrategyKind, String> {
+    let Some(value) = t.get("strategy") else {
+        return Ok(default);
+    };
+    match value.as_str() {
+        Some("demo") => Ok(StrategyKind::Demo),
+        Some("watchlist") => Ok(StrategyKind::Watchlist),
+        Some("movers") => Ok(StrategyKind::Movers),
+        _ => Err(format!(
+            "`strategy` must be demo, watchlist or movers, not {value}"
+        )),
+    }
+}
+
+const LINE_KEYS: &[&str] = &["skin", "speed", "strategy"];
+
+fn parse_line(t: &Table, default: &LineConfig) -> Result<LineConfig, String> {
+    if let Some(key) = t.keys().find(|k| !LINE_KEYS.contains(&k.as_str())) {
+        return Err(format!("unknown key `{key}`"));
+    }
+    Ok(LineConfig {
+        skin: string(t, "skin", &default.skin)?.to_owned(),
+        speed: number(t, "speed", default.speed, 0.0, 5_000.0)?,
+        strategy: strategy(t, default.strategy)?,
     })
 }
 
@@ -357,9 +418,14 @@ mod tests {
                 edge: Edge::Bottom
             }
         );
-        assert_eq!(b.skin, "classic-dark");
-        assert_eq!(b.speed, 120.0);
-        assert_eq!(b.strategy, StrategyKind::Demo);
+        assert_eq!(
+            b.lines,
+            [LineConfig {
+                skin: "classic-dark".into(),
+                speed: 120.0,
+                strategy: StrategyKind::Demo
+            }]
+        );
     }
 
     #[test]
@@ -400,6 +466,50 @@ mod tests {
                 displays: DisplaySelector::Index(1)
             }
         );
+    }
+
+    #[test]
+    fn lines_inherit_banner_defaults() {
+        let c = Config::parse(
+            r#"
+            [[banner]]
+            skin = "terminal"
+            speed = 80
+
+            [[banner.line]]
+            strategy = "movers"
+            speed = 240
+
+            [[banner.line]]
+            skin = "daylight"
+            "#,
+        )
+        .unwrap();
+        let lines = &c.banners[0].lines;
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            LineConfig {
+                skin: "terminal".into(),
+                speed: 240.0,
+                strategy: StrategyKind::Movers
+            }
+        );
+        assert_eq!(
+            lines[1],
+            LineConfig {
+                skin: "daylight".into(),
+                speed: 80.0,
+                strategy: StrategyKind::Demo
+            }
+        );
+        let err = Config::parse("[[banner]]\n[[banner.line]]\nsped = 3").unwrap_err();
+        assert!(
+            err.contains("banner 1: line 1: unknown key `sped`"),
+            "{err}"
+        );
+        let err = Config::parse("[[banner]]\nline = 3").unwrap_err();
+        assert!(err.contains("[[banner.line]]"), "{err}");
     }
 
     #[test]
