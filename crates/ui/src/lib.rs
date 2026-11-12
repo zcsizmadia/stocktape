@@ -439,8 +439,12 @@ impl SettingsApp {
             ui.push_id(("news", i), |ui| {
                 ui.horizontal(|ui| {
                     let label = ui.label("URL");
-                    ui.add(egui::TextEdit::singleline(&mut n.url).desired_width(360.0))
-                        .labelled_by(label.id);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut n.url)
+                            .hint_text("https://example.com/feed.rss")
+                            .desired_width(360.0),
+                    )
+                    .labelled_by(label.id);
                     let label = ui.label("Label");
                     let mut name = n.name.clone().unwrap_or_default();
                     if ui
@@ -477,7 +481,7 @@ impl SettingsApp {
         }
         if ui.button("Add news feed").clicked() {
             self.config.news.push(NewsConfig {
-                url: "https://".to_owned(),
+                url: String::new(),
                 name: None,
                 refresh: Duration::from_secs(300),
             });
