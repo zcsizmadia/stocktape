@@ -1,0 +1,17 @@
+[package]
+name = "stocktape-platform"
+description = "Per-OS integration for stocktape: docking, displays, window effects."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+stocktape-core.workspace = true
+stocktape-layout.workspace = true
+
+[lints]
+workspace = true

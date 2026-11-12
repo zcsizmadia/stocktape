@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/zcsizmadia/stocktape"
+homepage = "https://github.com/zcsizmadia/stocktape"
+publish = false
+
+[workspace.dependencies]
+stocktape-core = { path = "crates/core" }
+stocktape-sources = { path = "crates/sources" }
+stocktape-strategies = { path = "crates/strategies" }
+stocktape-layout = { path = "crates/layout" }
+stocktape-skin = { path = "crates/skin" }
+stocktape-render = { path = "crates/render" }
+stocktape-platform = { path = "crates/platform" }
+stocktape-ui = { path = "crates/ui" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -28,6 +28,21 @@ which quotes appear and when.
 - **Testable:** deterministic clock, mock and replay feeds, headless
   golden-image rendering tests.
 
+## Building
+
+Requires a stable Rust toolchain (see `rust-version` in `Cargo.toml`).
+
+```sh
+cargo build --workspace
+cargo test --workspace          # or: cargo nextest run --workspace
+cargo clippy --workspace --all-targets
+cargo run -- --help
+```
+
+The workspace is split into small crates under `crates/`: `core`, `sources`,
+`strategies`, `layout`, `skin`, `render`, `platform`, `ui` and `app` (the
+`stocktape` binary).
+
 ## Market data
 
 stocktape does not ship or redistribute market data. You bring your own API

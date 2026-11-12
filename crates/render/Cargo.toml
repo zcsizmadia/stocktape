@@ -1,0 +1,18 @@
+[package]
+name = "stocktape-render"
+description = "wgpu renderer for stocktape banners."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+stocktape-core.workspace = true
+stocktape-layout.workspace = true
+stocktape-skin.workspace = true
+
+[lints]
+workspace = true
