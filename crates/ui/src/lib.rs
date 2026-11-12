@@ -599,6 +599,7 @@ impl SettingsApp {
         ui.label(egui::RichText::new("Symbols are separated by commas or spaces; use EXCHANGE:TICKER for other exchanges, e.g. XLON:VOD.").weak());
         ui.separator();
         let mut remove = None;
+        let mut renamed: Option<(String, String)> = None;
         for (i, group) in groups.iter_mut().enumerate() {
             ui.push_id(("group", i), |ui| {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -610,8 +611,11 @@ impl SettingsApp {
                             .labelled_by(label.id)
                             .changed()
                         {
-                            group.title =
-                                (!title.trim().is_empty()).then(|| title.trim().to_owned());
+                            let new = (!title.trim().is_empty()).then(|| title.trim().to_owned());
+                            if let (Some(old), Some(new)) = (&group.title, &new) {
+                                renamed = Some((old.clone(), new.clone()));
+                            }
+                            group.title = new;
                         }
                         if ui.button("Remove group").clicked() {
                             remove = Some(i);
@@ -637,9 +641,35 @@ impl SettingsApp {
                 });
             });
         }
+        if let Some((old, new)) = renamed {
+            // Lines that showed the group follow its new title.
+            for line in self.config.banners.iter_mut().flat_map(|b| &mut b.lines) {
+                for g in &mut line.groups {
+                    if g.eq_ignore_ascii_case(&old) {
+                        g.clone_from(&new);
+                    }
+                }
+            }
+        }
+        let Some(groups) = &mut self.config.watchlist else {
+            return;
+        };
         if let Some(i) = remove {
-            groups.remove(i);
+            let removed = groups.remove(i);
             self.drafts.symbols.remove(i);
+            // Lines that showed only this group go back to all groups.
+            if let Some(title) = removed.title {
+                for line in self.config.banners.iter_mut().flat_map(|b| &mut b.lines) {
+                    line.groups.retain(|g| !g.eq_ignore_ascii_case(&title));
+                }
+            }
+            if groups.is_empty() {
+                // No groups left: use the demo watchlist again.
+                self.config.watchlist = None;
+                self.drafts.symbols.clear();
+                self.labels(ui);
+                return;
+            }
         }
         if ui.button("Add group").clicked() {
             groups.push(Group {
@@ -1134,5 +1164,47 @@ mod per_line_ui_tests {
         h.get_by_label("all groups").click();
         h.run();
         assert!(h.state().config().banners[0].lines[0].groups.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod watchlist_edit_ui_tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn deleting_groups_keeps_the_config_saveable() {
+        let config = Config::parse(
+            "[[watchlist]]\ntitle = \"Indices\"\nsymbols = [\"SPY\"]\n[[watchlist]]\ntitle = \"Tech\"\nsymbols = [\"AAPL\"]\n[[banner]]\ngroups = [\"Tech\"]",
+        )
+        .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "stocktape-ui-{}-wl-delete.toml",
+            std::process::id()
+        ));
+        let mut app = SettingsApp::new(path.clone(), config, SkinLibrary::builtin(), None);
+        app.tab = Tab::Watchlist;
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1200.0, 1200.0))
+            .build_ui_state(|ui, app: &mut SettingsApp| app.ui(ui), app);
+        h.run();
+        // Remove "Tech" (the second group): the line that showed it goes
+        // back to all groups.
+        h.get_all_by_label("Remove group").last().unwrap().click();
+        h.run();
+        assert!(h.state().config().banners[0].lines[0].groups.is_empty());
+        // Remove the last group: back to the demo watchlist.
+        h.get_by_label("Remove group").click();
+        h.run();
+        assert!(h.state().config().watchlist.is_none());
+        h.get_by_label("Save").click();
+        h.run();
+        assert!(
+            !h.state().is_dirty(),
+            "saving works after deleting the watchlist"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("toml.bak"));
     }
 }

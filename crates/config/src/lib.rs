@@ -1109,10 +1109,9 @@ fn watchlist(table: &Table) -> Result<Option<Vec<Group>>, String> {
         .enumerate()
         .map(|(i, v)| watchlist_group(v).map_err(|e| format!("watchlist group {}: {e}", i + 1)))
         .collect::<Result<Vec<_>, _>>()?;
-    if groups.iter().all(|g| g.symbols.is_empty()) {
-        return Err("the watchlist has no symbols".to_owned());
-    }
-    Ok(Some(groups))
+    // No groups means the demo watchlist; groups may be empty while being
+    // filled in.
+    Ok((!groups.is_empty()).then_some(groups))
 }
 
 fn watchlist_group(v: &Value) -> Result<Group, String> {
@@ -1407,5 +1406,21 @@ mod per_line_tests {
         assert!(err.contains("`symbols`"), "{err}");
         // Without a watchlist of your own, groups refer to the demo list.
         assert!(Config::parse("[[banner]]\ngroups = [\"Crypto\"]").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod watchlist_edit_tests {
+    use super::*;
+
+    #[test]
+    fn empty_watchlists_are_fine() {
+        // Regression: deleting every group (or every symbol) made saving
+        // fail with "the watchlist has no symbols".
+        let c = Config::parse("watchlist = []\n[[banner]]").unwrap();
+        assert!(c.watchlist.is_none());
+        let c =
+            Config::parse("[[banner]]\n[[watchlist]]\ntitle = \"Later\"\nsymbols = []").unwrap();
+        assert_eq!(c.watchlist.unwrap()[0].symbols.len(), 0);
     }
 }

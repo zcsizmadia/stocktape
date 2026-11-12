@@ -304,7 +304,7 @@ impl Config {
                 ),
             );
         }
-        if let Some(groups) = &self.watchlist {
+        if let Some(groups) = self.watchlist.as_ref().filter(|g| !g.is_empty()) {
             root.insert(
                 "watchlist".into(),
                 Value::Array(
