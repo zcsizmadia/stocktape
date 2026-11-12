@@ -151,8 +151,10 @@
                             Arguments='--settings'
                             WorkingDirectory='Bin'/>
                         <RemoveFolder Id='RemoveAppMenuFolder' On='uninstall'/>
+                        <!-- ICE57: the Start menu folder counts as per-user data,
+                             so the key path must be per-user too (HKCU, not HKMU). -->
                         <RegistryValue
-                            Root='HKMU'
+                            Root='HKCU'
                             Key='Software\stocktape'
                             Name='StartMenuShortcuts'
                             Type='integer'
