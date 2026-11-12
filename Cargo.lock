@@ -1936,8 +1936,11 @@ dependencies = [
 name = "stocktape-platform"
 version = "0.0.0"
 dependencies = [
+ "raw-window-handle",
  "stocktape-core",
  "stocktape-layout",
+ "windows-sys 0.61.2",
+ "x11rb",
 ]
 
 [[package]]

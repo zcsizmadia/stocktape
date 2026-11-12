@@ -82,6 +82,7 @@ reverse = true          # flow downward instead of upward
 | `offset` | distance from the screen edge, to stack banners | `0` |
 | `inset` | `[start, end]`: space left free at the ends of the edge | `[0, 0]` |
 | `reverse` | flow the other way | `false` |
+| `dock` | reserve screen space so maximized windows and the taskbar stay clear (edge banners) | `true` |
 | `strategy` | `demo`, `watchlist`, `movers` | `demo` |
 
 Unknown keys and bad values are errors that name the banner and key.
@@ -98,7 +99,14 @@ Unknown keys and bad values are errors that name the banner and key.
 - **Thickness** comes from the skin.
 - **Display changes** (plugging, unplugging, rearranging, rescaling) are
   picked up within a couple of seconds and the banners are laid out again.
-- Banners currently float on top of other windows. Reserving screen space so
-  maximized windows stay clear of them comes with docking (#8).
+- **Docking:** edge banners reserve their strip of the screen, like a taskbar.
+  Maximized windows stop at the banner, and on Windows the banner sits above
+  the taskbar. Space is given back when stocktape exits.
+  - Windows: AppBar. Linux X11: `_NET_WM_STRUT_PARTIAL` (most window managers
+    honour it).
+  - Wayland and macOS: not yet supported (macOS has no way to reserve space);
+    banners float on top instead, with a message saying so.
+  - `around` banners always float on top. Set `dock = false` to make any
+    banner float.
 - `--skin NAME` overrides every banner's skin; `--skins-dir DIR` loads your own
   skins and applies edits live (see [skins.md](skins.md)).
