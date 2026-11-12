@@ -13,6 +13,8 @@ publish.workspace = true
 stocktape-core.workspace = true
 stocktape-layout.workspace = true
 stocktape-skin.workspace = true
+cosmic-text.workspace = true
+tiny-skia.workspace = true
 
 [lints]
 workspace = true

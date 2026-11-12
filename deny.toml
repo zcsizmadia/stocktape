@@ -6,6 +6,11 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # ttf-parser is unmaintained (no known vulnerability). It comes in via
+    # cosmic-text -> fontdb; revisit when cosmic-text moves off it.
+    { id = "RUSTSEC-2026-0192", reason = "transitive via cosmic-text/fontdb; unmaintained, not vulnerable" },
+]
 
 [licenses]
 version = 2

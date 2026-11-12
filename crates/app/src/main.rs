@@ -2,6 +2,9 @@
 
 use std::process::ExitCode;
 
+mod ticker;
+mod window;
+
 /// What the command line asked for.
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -31,6 +34,9 @@ A broadcast-style scrolling stock ticker for the desktop.
 
 Usage: stocktape [OPTIONS]
 
+Without options, shows a demo banner with sample (not real) prices along the
+bottom of the primary display. Press Esc while it has focus to quit.
+
 Options:
   -h, --help     Print help
   -V, --version  Print version";
@@ -40,7 +46,10 @@ fn main() -> ExitCode {
         Ok(Command::Version) => println!("{}", version_line()),
         Ok(Command::Help) => println!("{HELP}"),
         Ok(Command::Run) => {
-            eprintln!("stocktape is in early development; there is nothing to run yet.");
+            if let Err(e) = window::run() {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
         }
         Err(message) => {
             eprintln!("error: {message}\n\n{HELP}");

@@ -8,6 +8,7 @@
 //! `docs/design-notes.md` for the design.
 
 mod clock;
+pub mod format;
 mod quote;
 mod store;
 mod symbol;
