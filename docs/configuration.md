@@ -16,9 +16,34 @@ stocktape --layout around --skin daylight
 |---|---|
 | `bottom` (default) | One banner along the bottom of the primary display |
 | `top-bottom` | Movers on top, the watchlist along the bottom |
-| `span` | One belt along the bottom of every display, flowing from screen to screen |
+| `span` | One belt along the bottom of every landscape display, flowing from screen to screen |
 | `around` | One belt around the edges of the primary display |
-| `around-desktop` | One belt around the outer edge of all displays (side by side) |
+| `around-desktop` | One belt around the outer edge of all landscape displays (side by side) |
+
+## Choosing monitors
+
+`stocktape --list-displays` shows each display with its index, name,
+position, size, scale and orientation:
+
+```text
+index  name                         position        size  scale  orientation
+0      \\.\DISPLAY1                      0,0   1920x1080   1.00  landscape, primary
+1      \\.\DISPLAY2                  -1920,0   1920x1080   1.00  landscape
+2      \\.\DISPLAY3                1920,-251   1050x1680   1.00  portrait
+```
+
+Then pick displays in the banner:
+
+```toml
+displays = "landscape"                  # every landscape display
+displays = ["DISPLAY2", "DISPLAY1"]     # exactly these (order on screen decides the flow)
+displays = "all"
+exclude = "portrait"                    # everything except portrait displays
+```
+
+Names are matched case-insensitively by substring and survive re-plugging and
+reboots better than indexes. A listed display that is missing is skipped; the
+banner is laid out on the ones that are there.
 
 ## Configuration file
 
@@ -50,7 +75,8 @@ reverse = true          # flow downward instead of upward
 |---|---|---|
 | `name` | any text, used in messages | `"Banner"` |
 | `place` | `top`, `bottom`, `left`, `right`, `around` | `bottom` |
-| `displays` | `"primary"`, `"all"`, an index (`0`, `1`, ...), or `"name:<text>"` | `"primary"` |
+| `displays` | `"primary"`, `"all"`, `"landscape"`, `"portrait"`, an index, a display name (or part of one), or a list of these | `"primary"` |
+| `exclude` | same forms as `displays`; displays to leave out | none |
 | `skin` | a skin name (see `--list-skins`) | `classic-dark` |
 | `speed` | logical pixels per second | `120` |
 | `offset` | distance from the screen edge, to stack banners | `0` |

@@ -399,3 +399,44 @@ pub fn run(
     event_loop.run_app(&mut app)?;
     app.error.map_or(Ok(()), Err)
 }
+
+/// Prints the displays as stocktape sees them, for choosing `displays` in the
+/// configuration.
+pub fn list_displays() -> Result<(), Box<dyn Error>> {
+    struct Lister(Option<Vec<Display>>);
+    impl ApplicationHandler for Lister {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            self.0 = Some(scan(event_loop));
+            event_loop.exit();
+        }
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+    let event_loop = EventLoop::new()?;
+    let mut lister = Lister(None);
+    event_loop.run_app(&mut lister)?;
+    let displays = lister.0.unwrap_or_default();
+    if displays.is_empty() {
+        println!("no displays found");
+    }
+    println!(
+        "{:<6} {:<24} {:>12} {:>11} {:>6}  orientation",
+        "index", "name", "position", "size", "scale"
+    );
+    for (i, d) in displays.iter().enumerate() {
+        println!(
+            "{:<6} {:<24} {:>12} {:>11} {:>6}  {}{}",
+            i,
+            d.name,
+            format!("{},{}", d.rect.x, d.rect.y),
+            format!("{}x{}", d.rect.width, d.rect.height),
+            format!("{:.2}", d.scale),
+            if d.is_landscape() {
+                "landscape"
+            } else {
+                "portrait"
+            },
+            if d.primary { ", primary" } else { "" },
+        );
+    }
+    Ok(())
+}

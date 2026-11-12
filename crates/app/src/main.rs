@@ -35,6 +35,7 @@ enum Command {
     Preview(Options),
     ListSkins(Options),
     ListLayouts,
+    ListDisplays,
     Version,
     Help,
 }
@@ -50,6 +51,7 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String
             "-h" | "--help" => return Ok(Command::Help),
             "--list-skins" => list = true,
             "--list-layouts" => return Ok(Command::ListLayouts),
+            "--list-displays" => return Ok(Command::ListDisplays),
             "--skin" => options.skin = Some(value("--skin")?),
             "--config" => options.config = Some(PathBuf::from(value("--config")?)),
             "--layout" => options.layout = Some(value("--layout")?),
@@ -94,6 +96,7 @@ Options:
       --config <FILE>     Banner configuration (see docs/configuration.md)
       --layout <NAME>     Built-in layout preset (see --list-layouts)
       --list-layouts      List layout presets and exit
+      --list-displays     List displays (names, positions, orientation) and exit
       --skin <NAME>       Skin for every banner (see --list-skins)
       --skins-dir <DIR>   Load extra skins from DIR (*.toml); edits reload live
       --list-skins        List available skins and exit
@@ -177,6 +180,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         Ok(Command::ListSkins(options)) => list_skins(&options),
+        Ok(Command::ListDisplays) => window::list_displays().map_err(|e| e.to_string()),
         Ok(Command::ListLayouts) => {
             for (name, description) in config::presets() {
                 println!("{name:<16} {description}");
