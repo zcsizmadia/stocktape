@@ -37,7 +37,10 @@ cargo build --workspace
 cargo test --workspace          # or: cargo nextest run --workspace
 cargo clippy --workspace --all-targets
 cargo run -- --help
+cargo run --release             # demo banner with sample (not real) prices; Esc quits
 ```
+
+No GPU is required: banners are drawn and composed on the CPU.
 
 The workspace is split into small crates under `crates/`: `core`, `sources`,
 `strategies`, `layout`, `skin`, `render`, `platform`, `ui` and `app` (the

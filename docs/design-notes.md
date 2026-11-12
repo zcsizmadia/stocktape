@@ -135,11 +135,18 @@ QuoteSource(s) ──► QuoteStore ──► Strategy/Scheduler ──► Belt 
 - **No web UI.** No HTML, CSS or webview anywhere; everything is native Rust.
   (Tauri with HTML/CSS skins was considered and rejected: heavier runtime,
   less control over frame timing.)
+- **Runs without a GPU.** Rendering is CPU-first:
+  - Each quote segment is drawn once into an RGBA image with `tiny-skia` +
+    `cosmic-text` and the bundled fonts (never system fonts), so output is
+    identical on every machine and checked against reference images.
+  - Frames are composed on the CPU (a 4K × 56 px strip is under 1 MB) and
+    presented with `softbuffer`. The demo uses about 0.3 % of one core.
+  - A wgpu backend is an optional upgrade for vsync-locked presentation and
+    effects; it falls back to software adapters (WARP, llvmpipe) and then to
+    the CPU path.
 - **Drawing the banner elements** (bars, tiers, pills, separators, gradients,
-  shadows, arrows, sparklines, flash/fade animations): an SDF rounded-rect
-  shader plus line strips in wgpu. Option: draw each segment once into a
-  texture with `vello` or `tiny-skia` + `cosmic-text`, and let wgpu only
-  scroll the textures. Rotated side-edge text is a rotated texture.
+  shadows, arrows, sparklines, flash/fade animations): `tiny-skia` paths and
+  fills into the segment images. Rotated side-edge text is a rotated image.
 - **Fonts:** bundled Inter (tabular figures) and JetBrains Mono, both OFL.
 - **Glass and overlays:** `window-vibrancy` for blur (Windows Acrylic/Mica,
   macOS vibrancy; Linux falls back to plain transparency); winit transparent
