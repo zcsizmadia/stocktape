@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/zcsizmadia/stocktape"
 homepage = "https://github.com/zcsizmadia/stocktape"
@@ -20,6 +20,7 @@ stocktape-skin = { path = "crates/skin" }
 stocktape-render = { path = "crates/render" }
 stocktape-platform = { path = "crates/platform" }
 stocktape-ui = { path = "crates/ui" }
+stocktape-config = { path = "crates/config" }
 
 jiff = "0.2"
 proptest = "1.12"

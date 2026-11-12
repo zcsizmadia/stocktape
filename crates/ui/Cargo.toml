@@ -1,6 +1,6 @@
 [package]
 name = "stocktape-ui"
-description = "egui settings window for stocktape."
+description = "The stocktape settings window (egui)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,8 +11,15 @@ publish.workspace = true
 
 [dependencies]
 stocktape-core.workspace = true
+stocktape-config.workspace = true
 stocktape-layout.workspace = true
 stocktape-skin.workspace = true
+stocktape-strategies.workspace = true
+tiny-skia.workspace = true
+eframe = "0.37"
+
+[dev-dependencies]
+egui_kittest = "0.37"
 
 [lints]
 workspace = true

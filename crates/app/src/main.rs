@@ -5,11 +5,10 @@ use std::process::ExitCode;
 
 use stocktape_skin::{SkinLibrary, SkinSource};
 
-mod config;
 mod ticker;
 mod window;
 
-use config::Config;
+use stocktape_config::{self as config, Config};
 
 /// Command-line options.
 #[derive(Debug, Default, PartialEq)]
@@ -36,6 +35,7 @@ enum Command {
     ListSkins(Options),
     ListLayouts,
     ListDisplays,
+    Settings(Options),
     Version,
     Help,
 }
@@ -43,6 +43,7 @@ enum Command {
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String> {
     let mut options = Options::default();
     let mut list = false;
+    let mut settings = false;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -52,6 +53,7 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String
             "--list-skins" => list = true,
             "--list-layouts" => return Ok(Command::ListLayouts),
             "--list-displays" => return Ok(Command::ListDisplays),
+            "--settings" => settings = true,
             "--skin" => options.skin = Some(value("--skin")?),
             "--config" => options.config = Some(PathBuf::from(value("--config")?)),
             "--layout" => options.layout = Some(value("--layout")?),
@@ -68,10 +70,13 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String
             other => return Err(format!("unknown argument: {other}")),
         }
     }
-    if options.config.is_some() && options.layout.is_some() {
+    // With --settings, --layout is the template for a new --config file.
+    if !settings && options.config.is_some() && options.layout.is_some() {
         return Err("use either --config or --layout, not both".to_owned());
     }
-    Ok(if list {
+    Ok(if settings {
+        Command::Settings(options)
+    } else if list {
         Command::ListSkins(options)
     } else if options.preview.is_some() {
         Command::Preview(options)
@@ -97,6 +102,8 @@ Options:
       --layout <NAME>     Built-in layout preset (see --list-layouts)
       --list-layouts      List layout presets and exit
       --list-displays     List displays (names, positions, orientation) and exit
+      --settings          Open the settings window (edits the configuration file;
+                          running banners pick up saved changes)
       --skin <NAME>       Skin for every banner (see --list-skins)
       --skins-dir <DIR>   Load extra skins from DIR (*.toml); edits reload live
       --list-skins        List available skins and exit
@@ -118,13 +125,25 @@ fn library(options: &Options) -> Result<SkinLibrary, String> {
 
 /// Loads the banner configuration: `--config`, else `--layout`, else the
 /// `bottom` preset; `--skin` overrides every banner's skin.
+/// The configuration file in use: `--config`, else the standard file if it
+/// exists (unless `--layout` picks a preset).
+fn config_path(options: &Options) -> Option<PathBuf> {
+    match (&options.config, &options.layout) {
+        (Some(path), _) => Some(path.clone()),
+        (None, Some(_)) => None,
+        (None, None) => config::default_path().filter(|p| p.exists()),
+    }
+}
+
+fn read_config(path: &std::path::Path) -> Result<Config, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+    Config::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 fn config(options: &Options) -> Result<Config, String> {
-    let mut config = match (&options.config, &options.layout) {
-        (Some(path), _) => {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("can't read {}: {e}", path.display()))?;
-            Config::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?
-        }
+    let mut config = match (config_path(options), &options.layout) {
+        (Some(path), _) => read_config(&path)?,
         (None, Some(name)) => Config::preset(name)?,
         (None, None) => Config::preset("bottom")?,
     };
@@ -134,6 +153,23 @@ fn config(options: &Options) -> Result<Config, String> {
         }
     }
     Ok(config)
+}
+
+/// Opens the settings window on `--config` or the standard file, creating it
+/// from `--layout` (default `bottom`) when it doesn't exist yet.
+fn settings(options: &Options) -> Result<(), String> {
+    let path = options
+        .config
+        .clone()
+        .or_else(config::default_path)
+        .ok_or("can't find a configuration folder; use --config FILE")?;
+    let config = if path.exists() {
+        read_config(&path)?
+    } else {
+        Config::preset(options.layout.as_deref().unwrap_or("bottom"))?
+    };
+    let library = library(options)?;
+    stocktape_ui::run(path, config, library, Some(Box::new(ticker::preview_frame)))
 }
 
 fn list_skins(options: &Options) -> Result<(), String> {
@@ -180,6 +216,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         Ok(Command::ListSkins(options)) => list_skins(&options),
+        Ok(Command::Settings(options)) => settings(&options),
         Ok(Command::ListDisplays) => window::list_displays().map_err(|e| e.to_string()),
         Ok(Command::ListLayouts) => {
             for (name, description) in config::presets() {
@@ -189,8 +226,12 @@ fn main() -> ExitCode {
         }
         Ok(Command::Preview(options)) => preview(&options),
         Ok(Command::Run(options)) => config(&options).and_then(|config| {
+            config.check_keys()?;
             let library = library(&options)?;
-            window::run(config, library, options.skins_dir).map_err(|e| e.to_string())
+            // Edits to the configuration file (by hand or from the settings
+            // window) apply live.
+            let reload = config_path(&options).map(|p| (p, options.skin.clone()));
+            window::run(config, library, options.skins_dir, reload).map_err(|e| e.to_string())
         }),
         Err(message) => {
             eprintln!("error: {message}\n\n{HELP}");
