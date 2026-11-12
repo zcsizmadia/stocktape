@@ -149,11 +149,11 @@ fn push_history(
         return;
     }
     // Same-timestamp updates replace the last point instead of adding one.
-    if let Some(last) = history.back_mut() {
-        if last.0 == time {
-            last.1 = price;
-            return;
-        }
+    if let Some(last) = history.back_mut()
+        && last.0 == time
+    {
+        last.1 = price;
+        return;
     }
     if history.len() == capacity {
         history.pop_front();
