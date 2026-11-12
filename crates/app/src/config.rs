@@ -18,7 +18,9 @@
 //! Several `[[banner]]` tables make several banners. Built-in presets cover
 //! the common layouts (`--layout top-bottom`, `span`, `around`, ...).
 
+use stocktape_core::Symbol;
 use stocktape_layout::{DisplaySelector, Edge, Placement, PlacementOptions};
+use stocktape_strategies::Group;
 use toml::{Table, Value};
 
 /// Which strategy a banner uses (until strategies are configurable in full).
@@ -66,6 +68,10 @@ pub struct BannerConfig {
 pub struct Config {
     /// Banners, in the order they were written.
     pub banners: Vec<BannerConfig>,
+    /// Data feeds, primary first; empty means sample data.
+    pub feeds: Vec<FeedConfig>,
+    /// Watchlist groups; `None` means the demo watchlist.
+    pub watchlist: Option<Vec<Group>>,
 }
 
 const PRESETS: &[(&str, &str, &str)] = &[
@@ -171,7 +177,10 @@ impl Config {
         let table: Table = text
             .parse()
             .map_err(|e: toml::de::Error| format!("invalid TOML: {}", e.to_string().trim()))?;
-        if let Some(key) = table.keys().find(|k| *k != "banner") {
+        if let Some(key) = table
+            .keys()
+            .find(|k| !["banner", "feed", "watchlist"].contains(&k.as_str()))
+        {
             return Err(format!("unknown key `{key}`"));
         }
         let Some(Value::Array(list)) = table.get("banner") else {
@@ -190,7 +199,11 @@ impl Config {
         if banners.is_empty() {
             return Err("no banners: add a [[banner]] table".to_owned());
         }
-        Ok(Self { banners })
+        Ok(Self {
+            banners,
+            feeds: feeds(&table)?,
+            watchlist: watchlist(&table)?,
+        })
     }
 }
 
@@ -563,5 +576,263 @@ mod tests {
         assert!(err("[[banner]]\n[[banner]]\nreverse = 1").contains("banner 2"));
         assert!(err("title = 1").contains("unknown key `title`"));
         assert!(err("[[banner").contains("invalid TOML"));
+    }
+}
+
+/// A data feed.
+#[derive(Clone, PartialEq)]
+pub struct FeedConfig {
+    /// Which provider.
+    pub provider: Provider,
+    /// The API key, read from the file or the environment. Never printed.
+    pub api_key: String,
+    /// Provider names for symbols whose default mapping is wrong.
+    pub names: Vec<(Symbol, String)>,
+}
+
+impl std::fmt::Debug for FeedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = if self.api_key.is_empty() { "" } else { "****" };
+        f.debug_struct("FeedConfig")
+            .field("provider", &self.provider)
+            .field("api_key", &key)
+            .field("names", &self.names)
+            .finish()
+    }
+}
+
+/// Supported data providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    /// Sample prices from the built-in mock feed.
+    Mock,
+    /// Finnhub (REST and WebSocket).
+    Finnhub,
+}
+
+const FEED_KEYS: &[&str] = &["provider", "api_key", "api_key_env", "symbols"];
+
+/// `[[feed]]` tables, primary first. The API key comes from `api_key_env`
+/// (default `FINNHUB_API_KEY`) unless `api_key` is set in the file.
+fn feeds(table: &Table) -> Result<Vec<FeedConfig>, String> {
+    feeds_with(table, &|name| std::env::var(name).ok())
+}
+
+fn feeds_with(
+    table: &Table,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<FeedConfig>, String> {
+    let Some(value) = table.get("feed") else {
+        return Ok(Vec::new());
+    };
+    let Value::Array(list) = value else {
+        return Err("`feed` must be one or more [[feed]] tables".to_owned());
+    };
+    list.iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let t = v
+                .as_table()
+                .ok_or_else(|| format!("feed {} must be a table", i + 1))?;
+            feed(t, env).map_err(|e| format!("feed {}: {e}", i + 1))
+        })
+        .collect()
+}
+
+fn feed(t: &Table, env: &dyn Fn(&str) -> Option<String>) -> Result<FeedConfig, String> {
+    if let Some(key) = t.keys().find(|k| !FEED_KEYS.contains(&k.as_str())) {
+        return Err(format!("unknown key `{key}`"));
+    }
+    let provider = match string(t, "provider", "")? {
+        "finnhub" => Provider::Finnhub,
+        "mock" => Provider::Mock,
+        "" => return Err("missing `provider` (finnhub or mock)".to_owned()),
+        other => {
+            return Err(format!("`provider` must be finnhub or mock, not {other:?}"));
+        }
+    };
+    let api_key = match t.get("api_key") {
+        Some(v) => v
+            .as_str()
+            .ok_or_else(|| "`api_key` must be a string".to_owned())?
+            .to_owned(),
+        None if provider == Provider::Finnhub => {
+            let var = string(t, "api_key_env", "FINNHUB_API_KEY")?;
+            env(var).filter(|k| !k.trim().is_empty()).ok_or_else(|| {
+                format!("no API key: set the {var} environment variable (or `api_key`)")
+            })?
+        }
+        None => String::new(),
+    };
+    let names = match t.get("symbols") {
+        None => Vec::new(),
+        Some(Value::Table(map)) => map
+            .iter()
+            .map(|(symbol, name)| {
+                let parsed: Symbol = symbol
+                    .parse()
+                    .map_err(|e| format!("`symbols`: {symbol:?}: {e}"))?;
+                let name = name
+                    .as_str()
+                    .ok_or_else(|| format!("`symbols.{symbol}` must be a string"))?;
+                Ok((parsed, name.to_owned()))
+            })
+            .collect::<Result<_, String>>()?,
+        Some(_) => {
+            return Err("`symbols` must be a table of symbol = \"provider name\"".to_owned());
+        }
+    };
+    Ok(FeedConfig {
+        provider,
+        api_key: api_key.trim().to_owned(),
+        names,
+    })
+}
+
+const WATCHLIST_KEYS: &[&str] = &["title", "symbols"];
+
+/// `[[watchlist]]` groups.
+fn watchlist(table: &Table) -> Result<Option<Vec<Group>>, String> {
+    let Some(value) = table.get("watchlist") else {
+        return Ok(None);
+    };
+    let Value::Array(list) = value else {
+        return Err("`watchlist` must be one or more [[watchlist]] tables".to_owned());
+    };
+    let groups = list
+        .iter()
+        .enumerate()
+        .map(|(i, v)| watchlist_group(v).map_err(|e| format!("watchlist group {}: {e}", i + 1)))
+        .collect::<Result<Vec<_>, _>>()?;
+    if groups.iter().all(|g| g.symbols.is_empty()) {
+        return Err("the watchlist has no symbols".to_owned());
+    }
+    Ok(Some(groups))
+}
+
+fn watchlist_group(v: &Value) -> Result<Group, String> {
+    let t = v.as_table().ok_or_else(|| "must be a table".to_owned())?;
+    if let Some(key) = t.keys().find(|k| !WATCHLIST_KEYS.contains(&k.as_str())) {
+        return Err(format!("unknown key `{key}`"));
+    }
+    let title = match t.get("title") {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| "`title` must be a string".to_owned())?
+                .to_owned(),
+        ),
+    };
+    let Some(Value::Array(symbols)) = t.get("symbols") else {
+        return Err("needs `symbols = [\"AAPL\", ...]`".to_owned());
+    };
+    let symbols = symbols
+        .iter()
+        .map(|s| {
+            let s = s
+                .as_str()
+                .ok_or_else(|| "symbols must be strings".to_owned())?;
+            s.parse::<Symbol>().map_err(|e| format!("{s:?}: {e}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Group { title, symbols })
+}
+
+#[cfg(test)]
+mod feed_tests {
+    use super::*;
+
+    fn parse_feeds(text: &str, env: &[(&str, &str)]) -> Result<Vec<FeedConfig>, String> {
+        let table: Table = text.parse().unwrap();
+        feeds_with(&table, &|name| {
+            env.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_owned())
+        })
+    }
+
+    #[test]
+    fn finnhub_key_from_environment() {
+        let feeds = parse_feeds(
+            "[[feed]]\nprovider = \"finnhub\"",
+            &[("FINNHUB_API_KEY", " k3y ")],
+        )
+        .unwrap();
+        assert_eq!(feeds[0].provider, Provider::Finnhub);
+        assert_eq!(feeds[0].api_key, "k3y");
+        let custom = parse_feeds(
+            "[[feed]]\nprovider = \"finnhub\"\napi_key_env = \"MY_KEY\"",
+            &[("MY_KEY", "abc")],
+        )
+        .unwrap();
+        assert_eq!(custom[0].api_key, "abc");
+        let missing = parse_feeds("[[feed]]\nprovider = \"finnhub\"", &[]).unwrap_err();
+        assert!(
+            missing.contains("set the FINNHUB_API_KEY environment variable"),
+            "{missing}"
+        );
+    }
+
+    #[test]
+    fn keys_never_show_in_debug_output() {
+        let feeds = parse_feeds(
+            "[[feed]]\nprovider = \"finnhub\"\napi_key = \"secret-key\"",
+            &[],
+        )
+        .unwrap();
+        let shown = format!("{feeds:?}");
+        assert!(!shown.contains("secret-key"), "{shown}");
+        assert!(shown.contains("****"));
+    }
+
+    #[test]
+    fn symbol_names_and_errors() {
+        let feeds = parse_feeds(
+            "[[feed]]\nprovider = \"finnhub\"\napi_key = \"k\"\n[feed.symbols]\n\"BTC-USD\" = \"COINBASE:BTC-USD\"",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            feeds[0].names,
+            [("BTC-USD".parse().unwrap(), "COINBASE:BTC-USD".to_owned())]
+        );
+        assert!(
+            parse_feeds("[[feed]]", &[])
+                .unwrap_err()
+                .contains("missing `provider`")
+        );
+        assert!(
+            parse_feeds("[[feed]]\nprovider = \"yahoo\"", &[])
+                .unwrap_err()
+                .contains("finnhub or mock")
+        );
+        assert!(
+            parse_feeds("[[feed]]\nprovider = \"mock\"\ntoken = 1", &[])
+                .unwrap_err()
+                .contains("unknown key `token`")
+        );
+    }
+
+    #[test]
+    fn watchlist_groups() {
+        let c = Config::parse(
+            r#"
+            [[banner]]
+            [[watchlist]]
+            title = "Indices"
+            symbols = ["SPY", "QQQ"]
+            [[watchlist]]
+            symbols = ["XLON:VOD"]
+            "#,
+        )
+        .unwrap();
+        let groups = c.watchlist.unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].title.as_deref(), Some("Indices"));
+        assert_eq!(groups[1].symbols[0].to_string(), "XLON:VOD");
+        let err = Config::parse("[[banner]]\n[[watchlist]]\nsymbols = [\"A B\"]").unwrap_err();
+        assert!(err.contains("watchlist group 1"), "{err}");
+        assert!(Config::parse("[[banner]]\n[[watchlist]]\ntitle = \"x\"").is_err());
+        assert!(Config::parse("[[banner]]").unwrap().watchlist.is_none());
     }
 }

@@ -46,6 +46,44 @@ Names are matched case-insensitively by substring and survive re-plugging and
 reboots better than indexes. A listed display that is missing is skipped; the
 banner is laid out on the ones that are there.
 
+## Real data and your watchlist
+
+Without a `[[feed]]`, stocktape shows sample prices. To show real quotes,
+add a feed and a watchlist:
+
+```toml
+[[feed]]
+provider = "finnhub"             # https://finnhub.io; free accounts work
+# api_key_env = "FINNHUB_API_KEY" (default): the key is read from this
+# environment variable. You can also write api_key = "..." here, but keep
+# the file private if you do.
+
+[feed.symbols]                   # optional: Finnhub names that differ
+"BTC-USD" = "BINANCE:BTCUSDT"     # (crypto -USD pairs map like this already)
+
+[[watchlist]]
+title = "Indices"
+symbols = ["SPY", "QQQ", "DIA"]
+
+[[watchlist]]
+title = "Tech"
+symbols = ["AAPL", "MSFT", "NVDA"]
+```
+
+- Set the key once, e.g. on Windows `setx FINNHUB_API_KEY your-key` (new
+  terminals pick it up), or `export FINNHUB_API_KEY=your-key` on Linux/macOS.
+- Prices come from Finnhub snapshots (previous close, for the change) and its
+  live trade stream. Free accounts allow 60 requests a minute and 50 streamed
+  symbols, and some exchanges are delayed or paid; check Finnhub's terms.
+- **Several feeds:** list more `[[feed]]` tables. The first is the primary;
+  a later feed takes over a symbol only when the ones before it have been
+  quiet for that symbol for 30 s, and hands it back when they recover.
+- Quotes not refreshed for 15 minutes (for example while a feed is down) are
+  drawn faded.
+- Feed problems are printed once each (connected, disconnected, retrying,
+  a rejected key). API keys never appear in messages.
+- stocktape never stores or redistributes market data.
+
 ## Configuration file
 
 For anything else, write a `stocktape.toml` and run `stocktape --config stocktape.toml`.

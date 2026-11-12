@@ -30,6 +30,8 @@ const FONTS: [&[u8]; 5] = [
 const SPARK_POINTS: usize = 64;
 /// Opacity of the move-color wash behind highlighted quotes.
 const HIGHLIGHT_ALPHA: u8 = 40;
+/// Opacity of the background wash over stale quotes.
+const STALE_ALPHA: u8 = 150;
 
 /// The display text of one quote.
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +50,8 @@ pub struct QuoteSegment {
     pub history: Vec<f64>,
     /// Draw attention to this quote (a strategy flagged it).
     pub highlight: bool,
+    /// The data is old (the feed is down or quiet); drawn faded.
+    pub stale: bool,
 }
 
 impl QuoteSegment {
@@ -68,7 +72,15 @@ impl QuoteSegment {
             direction: quote.direction(),
             history: Vec::new(),
             highlight: false,
+            stale: false,
         }
+    }
+
+    /// Marks the quote as stale (old data), drawn faded.
+    #[must_use]
+    pub fn with_stale(mut self, stale: bool) -> Self {
+        self.stale = stale;
+        self
     }
 
     /// Marks the quote as highlighted (or not).
@@ -347,6 +359,7 @@ impl SegmentRenderer {
             direction: Direction::Flat,
             history: Vec::new(),
             highlight: false,
+            stale: false,
         };
         self.render(vec![Part::Text { x, shaped }], width, &blank, scale)
     }
@@ -442,6 +455,15 @@ impl SegmentRenderer {
                         accent,
                     );
                 }
+            }
+        }
+
+        if segment.stale {
+            // Old data: fade everything towards the background.
+            if let Some(rect) = Rect::from_xywh(0.0, 0.0, px_width, px_height) {
+                let mut paint = Paint::default();
+                paint.set_color(to_skia(style.background.with_alpha(STALE_ALPHA)));
+                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
             }
         }
 
@@ -789,6 +811,8 @@ mod tests {
         check_golden("header_1x", &r.draw_header("Tech", 1.0).pixmap);
         let hot = sample("NVDA", 191.0, 182.07).with_highlight(true);
         check_golden("highlight_up_1x", &r.draw(&hot, 1.0).pixmap);
+        let old = sample("AAPL", 238.41, 236.24).with_stale(true);
+        check_golden("stale_up_1x", &r.draw(&old, 1.0).pixmap);
     }
 
     #[test]
