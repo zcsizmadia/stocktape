@@ -64,6 +64,9 @@ impl SkinWatch {
             .parent()
             .filter(|d| !d.as_os_str().is_empty())
             .unwrap_or(std::path::Path::new("."));
+        // The folder may not exist before the first save; create it so it
+        // can be watched.
+        std::fs::create_dir_all(dir)?;
         let mut watch = Self::new(dir.to_path_buf())?;
         watch.file = path.file_name().map(std::ffi::OsStr::to_os_string);
         Ok(watch)

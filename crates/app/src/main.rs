@@ -135,6 +135,17 @@ fn config_path(options: &Options) -> Option<PathBuf> {
     }
 }
 
+/// The file to watch for live reload. Without `--config` or `--layout`
+/// this is the standard file even when it doesn't exist yet, so the first
+/// save from the settings window applies to banners already running.
+fn watch_path(options: &Options) -> Option<PathBuf> {
+    match (&options.config, &options.layout) {
+        (Some(path), _) => Some(path.clone()),
+        (None, Some(_)) => None,
+        (None, None) => config::default_path(),
+    }
+}
+
 fn read_config(path: &std::path::Path) -> Result<Config, String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
@@ -236,7 +247,7 @@ fn main() -> ExitCode {
             let library = library(&options)?;
             // Edits to the configuration file (by hand or from the settings
             // window) apply live.
-            let reload = config_path(&options).map(|p| (p, options.skin.clone()));
+            let reload = watch_path(&options).map(|p| (p, options.skin.clone()));
             window::run(config, library, options.skins_dir, reload).map_err(|e| e.to_string())
         }),
         Err(message) => {
@@ -299,6 +310,22 @@ mod tests {
         assert!(parse_args(args(&["--skin"])).is_err());
         assert!(parse_args(args(&["--preview", "a.png", "--width", "abc"])).is_err());
         assert!(parse_args(args(&["--preview", "a.png", "--width", "5"])).is_err());
+    }
+
+    #[test]
+    fn watches_the_standard_file_even_before_it_exists() {
+        let none = Options::default();
+        assert_eq!(watch_path(&none), config::default_path());
+        let file = Options {
+            config: Some(PathBuf::from("my.toml")),
+            ..Options::default()
+        };
+        assert_eq!(watch_path(&file), Some(PathBuf::from("my.toml")));
+        let preset = Options {
+            layout: Some("around".to_owned()),
+            ..Options::default()
+        };
+        assert_eq!(watch_path(&preset), None);
     }
 
     #[test]
