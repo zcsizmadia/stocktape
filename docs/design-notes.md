@@ -72,8 +72,10 @@ MIT licensed. Cross-platform: Windows, Linux and macOS.
   sources ship for demos and tests.
 - **Global markets.** Foreign exchanges alongside US ones in the same belt,
   e.g. LSE, Euronext, XETRA, TSE (Tokyo), HKEX, TSX, ASX:
-  - Symbols carry an exchange (e.g. `VOD.L`, `7203.T`, `SAP.DE`), mapped to
-    each provider's own naming.
+  - Symbols carry an exchange. The canonical form is `EXCHANGE:TICKER` with
+    ISO 10383 MIC codes (e.g. `XLON:VOD`, `XTKS:7203`, `XETR:SAP`); a colon,
+    not a dot suffix, because tickers like `BRK.B` contain dots. Feed adapters
+    map to each provider's naming (`VOD.L`, `7203.T`, `SAP.DE`).
   - Each exchange has its own time zone, trading hours, holidays and
     open/closed status, which strategies can use (e.g. show Asian markets
     overnight in the US, Europe at the US open).
