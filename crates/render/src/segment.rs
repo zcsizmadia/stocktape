@@ -28,6 +28,8 @@ const FONTS: [&[u8]; 5] = [
 
 /// Price points kept for a sparkline.
 const SPARK_POINTS: usize = 64;
+/// Opacity of the move-color wash behind highlighted quotes.
+const HIGHLIGHT_ALPHA: u8 = 40;
 
 /// The display text of one quote.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +46,8 @@ pub struct QuoteSegment {
     pub direction: Direction,
     /// Recent prices, oldest first, for a sparkline.
     pub history: Vec<f64>,
+    /// Draw attention to this quote (a strategy flagged it).
+    pub highlight: bool,
 }
 
 impl QuoteSegment {
@@ -63,7 +67,15 @@ impl QuoteSegment {
                 .unwrap_or_default(),
             direction: quote.direction(),
             history: Vec::new(),
+            highlight: false,
         }
+    }
+
+    /// Marks the quote as highlighted (or not).
+    #[must_use]
+    pub fn with_highlight(mut self, highlight: bool) -> Self {
+        self.highlight = highlight;
+        self
     }
 
     /// Adds recent prices for a sparkline (only the last few dozen are kept).
@@ -309,6 +321,43 @@ impl SegmentRenderer {
             "invalid scale factor {scale}"
         );
         let (parts, width) = self.layout(segment, scale);
+        self.render(parts, width, segment, scale)
+    }
+
+    /// Draws a section header tile, e.g. `TECH`, in the symbol font and the
+    /// skin's neutral color.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `scale` is not finite and positive.
+    pub fn draw_header(&mut self, title: &str, scale: f32) -> SegmentImage {
+        assert!(
+            scale.is_finite() && scale > 0.0,
+            "invalid scale factor {scale}"
+        );
+        let style = self.style.clone();
+        let shaped = self.shape(&title.to_uppercase(), &style.symbol, style.flat, scale);
+        let x = style.padding * scale;
+        let width = x * 2.0 + shaped.width;
+        let blank = QuoteSegment {
+            symbol: String::new(),
+            price: String::new(),
+            change: String::new(),
+            percent: String::new(),
+            direction: Direction::Flat,
+            history: Vec::new(),
+            highlight: false,
+        };
+        self.render(vec![Part::Text { x, shaped }], width, &blank, scale)
+    }
+
+    fn render(
+        &mut self,
+        parts: Vec<Part>,
+        width: f32,
+        segment: &QuoteSegment,
+        scale: f32,
+    ) -> SegmentImage {
         let style = self.style.clone();
         let accent = self.direction_color(segment.direction);
         let px_width = width.ceil().max(1.0);
@@ -317,6 +366,14 @@ impl SegmentRenderer {
         let mut pixmap =
             Pixmap::new(px_width as u32, px_height as u32).expect("segment size is non-zero");
         pixmap.fill(to_skia(style.background));
+        if segment.highlight {
+            // A soft wash of the move color marks highlighted quotes.
+            if let Some(rect) = Rect::from_xywh(0.0, 0.0, px_width, px_height) {
+                let mut paint = Paint::default();
+                paint.set_color(to_skia(accent.with_alpha(HIGHLIGHT_ALPHA)));
+                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+            }
+        }
 
         let baseline = style.height * style.baseline * scale;
         for part in parts {
@@ -724,6 +781,14 @@ mod tests {
         let s = sample("AAPL", 1.0, 1.0).with_history((0..100).map(f64::from).chain([f64::NAN]));
         assert_eq!(s.history.len(), 64);
         assert_eq!(s.history[0], 36.0);
+    }
+
+    #[test]
+    fn golden_header_and_highlight() {
+        let mut r = SegmentRenderer::new(BannerStyle::default());
+        check_golden("header_1x", &r.draw_header("Tech", 1.0).pixmap);
+        let hot = sample("NVDA", 191.0, 182.07).with_highlight(true);
+        check_golden("highlight_up_1x", &r.draw(&hot, 1.0).pixmap);
     }
 
     #[test]

@@ -11,6 +11,10 @@ publish.workspace = true
 
 [dependencies]
 stocktape-core.workspace = true
+jiff.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 
 [lints]
 workspace = true
