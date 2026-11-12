@@ -1,0 +1,27 @@
+[package]
+name = "stocktape"
+description = "A broadcast-style scrolling stock ticker for the desktop."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "stocktape"
+path = "src/main.rs"
+
+[dependencies]
+stocktape-core.workspace = true
+stocktape-sources.workspace = true
+stocktape-strategies.workspace = true
+stocktape-layout.workspace = true
+stocktape-skin.workspace = true
+stocktape-render.workspace = true
+stocktape-platform.workspace = true
+stocktape-ui.workspace = true
+
+[lints]
+workspace = true
