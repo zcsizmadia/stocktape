@@ -26,6 +26,7 @@ tiny-skia.workspace = true
 winit.workspace = true
 softbuffer.workspace = true
 notify.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true
