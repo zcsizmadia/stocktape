@@ -11,6 +11,8 @@
 //! | [`Schedule`] | Switches strategy by local time of day (pre-market, session, after hours). |
 //! | [`Caps`] | Keeps repeats apart: a minimum gap per symbol and a limit per time window. |
 //! | [`Highlights`] | Marks items worth attention: big moves, new session highs and lows. |
+//! | [`Headlines`] | Cycles through the latest news headlines, newest first. |
+//! | [`Messages`] | Cycles through your own text messages. |
 //!
 //! Everything is deterministic: time comes from the [`Context`], and random
 //! choices use a seeded generator, so tests can replay exact sequences.
@@ -19,6 +21,7 @@
 //! `docs/design-notes.md` for the design.
 
 mod caps;
+mod headlines;
 mod highlights;
 mod mix;
 mod movers;
@@ -27,9 +30,10 @@ mod watchlist;
 
 use std::time::Duration;
 
-use stocktape_core::{QuoteStore, Symbol, Timestamp};
+use stocktape_core::{Headline, QuoteStore, Symbol, Timestamp};
 
 pub use caps::Caps;
+pub use headlines::{Headlines, Messages};
 pub use highlights::{HighlightRules, Highlights};
 pub use mix::Mix;
 pub use movers::Movers;
@@ -45,6 +49,8 @@ pub struct Context<'a> {
     pub now: Duration,
     /// Wall-clock time, for schedules.
     pub wall: Timestamp,
+    /// The latest news headlines, newest first.
+    pub headlines: &'a [Headline],
 }
 
 /// Why an item is highlighted.
@@ -70,6 +76,10 @@ pub enum Item {
     },
     /// A section header tile, e.g. `TECH` or `EUROPE`.
     Header(String),
+    /// A news headline.
+    Headline(Headline),
+    /// A text message of your own, e.g. `MARKETS CLOSE IN 15 MIN`.
+    Text(String),
 }
 
 impl Item {
@@ -87,7 +97,7 @@ impl Item {
     pub fn symbol(&self) -> Option<&Symbol> {
         match self {
             Self::Quote { symbol, .. } => Some(symbol),
-            Self::Header(_) => None,
+            Self::Header(_) | Self::Headline(_) | Self::Text(_) => None,
         }
     }
 }
@@ -150,6 +160,7 @@ pub(crate) mod test_util {
             store,
             now,
             wall: Timestamp::UNIX_EPOCH,
+            headlines: &[],
         }
     }
 
@@ -163,6 +174,8 @@ pub(crate) mod test_util {
             .map(|_| match strategy.next(ctx) {
                 Some(Item::Quote { symbol, .. }) => symbol.to_string(),
                 Some(Item::Header(h)) => format!("#{h}"),
+                Some(Item::Headline(h)) => format!("!{}", h.title),
+                Some(Item::Text(t)) => format!("\"{t}\""),
                 None => "-".to_owned(),
             })
             .collect()

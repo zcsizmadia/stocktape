@@ -6,6 +6,7 @@
 //! - [`massive`]: Massive (formerly Polygon.io), batched and rate-limited
 //!   REST snapshots.
 //! - [`limiter`]: request pacing for rate-limited APIs.
+//! - [`news`]: headlines from RSS and Atom feeds.
 //! - [`failover`]: decides which of several feeds a symbol's quotes come from.
 //!
 //! Live feeds run on their own threads and send [`FeedEvent`]s over a
@@ -21,18 +22,26 @@ pub mod finnhub;
 pub mod limiter;
 pub mod massive;
 pub mod mock;
+pub mod news;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
-use stocktape_core::Quote;
+use stocktape_core::{Headline, Quote};
 
 /// Something a feed reports.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Update {
     /// A new or updated quote.
     Quote(Quote),
+    /// The latest headlines from one news source (replacing earlier ones).
+    Headlines {
+        /// The source's name.
+        source: String,
+        /// Its headlines, newest feed order.
+        items: Vec<Headline>,
+    },
     /// The feed connected, disconnected or hit a problem; for the user.
     Status {
         /// Whether quotes are flowing.

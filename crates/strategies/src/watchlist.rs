@@ -36,7 +36,7 @@ impl Group {
 /// for s in ["AAPL", "MSFT"] {
 ///     store.apply(Quote::new(s.parse().unwrap(), 1.0, Timestamp::UNIX_EPOCH), Duration::ZERO);
 /// }
-/// let ctx = Context { store: &store, now: Duration::ZERO, wall: Timestamp::UNIX_EPOCH };
+/// let ctx = Context { store: &store, now: Duration::ZERO, wall: Timestamp::UNIX_EPOCH, headlines: &[] };
 /// let mut list = Watchlist::new(["AAPL", "MSFT"].map(|s| s.parse().unwrap()));
 /// assert_eq!(list.next(&ctx), Some(Item::quote("AAPL".parse().unwrap())));
 /// assert_eq!(list.next(&ctx), Some(Item::quote("MSFT".parse().unwrap())));

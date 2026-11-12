@@ -31,6 +31,7 @@ softbuffer = "0.4"
 toml = "1"
 notify = "8"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+quick-xml = "0.41"
 tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }

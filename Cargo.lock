@@ -3701,6 +3701,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 name = "stocktape"
 version = "0.0.0"
 dependencies = [
+ "jiff",
  "notify",
  "softbuffer",
  "stocktape-config",
@@ -3780,7 +3781,9 @@ dependencies = [
 name = "stocktape-sources"
 version = "0.0.0"
 dependencies = [
+ "jiff",
  "proptest",
+ "quick-xml",
  "rustls",
  "serde",
  "serde_json",
