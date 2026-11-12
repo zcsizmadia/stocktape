@@ -168,7 +168,13 @@ impl Market {
             .filter(|f| f.provider != Provider::Mock)
             .collect();
         if live.is_empty() {
-            return Self::demo(seed);
+            // Sample prices for every configured symbol, not only the demo
+            // list, so lines with their own symbols show something.
+            let mut market = Self::demo(seed);
+            if let Source::Mock { feed, .. } = &mut market.source {
+                feed.add_samples(groups.iter().flat_map(|g| &g.symbols));
+            }
+            return market;
         }
         let mut symbols: Vec<Symbol> = Vec::new();
         for s in groups.iter().flat_map(|g| &g.symbols) {

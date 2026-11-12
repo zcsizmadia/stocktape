@@ -96,6 +96,28 @@ impl MockFeed {
         });
     }
 
+    /// Adds sample instruments for any of `symbols` the feed doesn't have
+    /// yet, so every configured symbol shows something without a real feed.
+    /// Each gets a made-up but stable starting price derived from its name.
+    pub fn add_samples<'a>(&mut self, symbols: impl IntoIterator<Item = &'a Symbol>) {
+        for symbol in symbols {
+            if self.instruments.iter().any(|i| &i.symbol == symbol) {
+                continue;
+            }
+            // FNV-1a over the name: the same symbol always starts at the same
+            // price, between 10 and 600.
+            let hash = symbol
+                .to_string()
+                .bytes()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+                    (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+                });
+            #[allow(clippy::cast_precision_loss)]
+            let close = 10.0 + (hash % 59_000) as f64 / 100.0;
+            self.add(symbol.clone(), close, Currency::USD, 0.001);
+        }
+    }
+
     /// The symbols in the feed, in the order they were added.
     pub fn symbols(&self) -> impl Iterator<Item = &Symbol> {
         self.instruments.iter().map(|i| &i.symbol)
@@ -156,6 +178,26 @@ impl XorShift {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn samples_for_any_symbol() {
+        let mut feed = MockFeed::demo(1);
+        let extra: Vec<Symbol> = ["FANG", "QCOM", "AAPL"]
+            .iter()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        feed.add_samples(&extra);
+        let symbols: Vec<String> = feed.symbols().map(ToString::to_string).collect();
+        assert_eq!(symbols.len(), 12, "AAPL was already there: {symbols:?}");
+        let quotes = feed.tick(Timestamp::UNIX_EPOCH);
+        let fang = quotes.iter().find(|q| q.symbol.ticker() == "FANG").unwrap();
+        assert!((10.0..=610.0).contains(&fang.last), "{fang:?}");
+        // Stable: the same symbol starts at the same price in another feed.
+        let mut again = MockFeed::new(99);
+        again.add_samples(&extra[..1]);
+        let first = again.tick(Timestamp::UNIX_EPOCH);
+        assert_eq!(first[0].previous_close, fang.previous_close);
+    }
 
     fn at(s: i64) -> Timestamp {
         Timestamp::from_second(s).unwrap()
