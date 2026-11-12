@@ -326,8 +326,7 @@ impl App {
             });
         match loaded {
             Ok((config, banners)) => {
-                let groups = config.watchlist.clone().unwrap_or_else(demo_groups);
-                self.market = Market::from_config(&config.feeds, &groups, self.seed)
+                self.market = Market::from_config(&config.feeds, &feed_groups(&config), self.seed)
                     .with_news(&config.news)
                     .with_labels(&config.labels);
                 self.banners = banners;
@@ -461,7 +460,6 @@ pub fn run(
 ) -> Result<(), Box<dyn Error>> {
     let clock = SystemClock::new();
     let seed = seed();
-    let groups = config.watchlist.clone().unwrap_or_else(demo_groups);
     // Fail before opening any window if a skin is broken.
     let banners = build_banners(&config, &library, seed, &clock)?;
     let watch = skins_dir.map(SkinWatch::new).transpose()?;
@@ -477,7 +475,7 @@ pub fn run(
     let event_loop = EventLoop::new()?;
     let mut app = App {
         clock,
-        market: Market::from_config(&config.feeds, &groups, seed)
+        market: Market::from_config(&config.feeds, &feed_groups(&config), seed)
             .with_news(&config.news)
             .with_labels(&config.labels),
         banners,
@@ -526,6 +524,8 @@ fn build_banners(
                     strategy: line.strategy,
                     content: line.content,
                     messages: line.messages.clone(),
+                    groups: line.groups.clone(),
+                    symbols: line.symbols.clone(),
                     speed: line.speed,
                     style,
                 })
@@ -595,4 +595,23 @@ fn line_styles(
                 .map(|skin| BannerStyle::from(&skin))
         })
         .collect()
+}
+
+/// Everything the feeds must follow: the watchlist plus any symbols lines
+/// list on their own.
+fn feed_groups(config: &Config) -> Vec<stocktape_strategies::Group> {
+    let mut groups = config.watchlist.clone().unwrap_or_else(demo_groups);
+    let extra: Vec<stocktape_core::Symbol> = config
+        .banners
+        .iter()
+        .flat_map(|b| &b.lines)
+        .flat_map(|l| l.symbols.iter().cloned())
+        .collect();
+    if !extra.is_empty() {
+        groups.push(stocktape_strategies::Group {
+            title: None,
+            symbols: extra,
+        });
+    }
+    groups
 }

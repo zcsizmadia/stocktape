@@ -61,6 +61,8 @@ struct Drafts {
     symbols: Vec<String>,
     /// Symbol for a new display name.
     new_label: String,
+    /// Per (banner, line): the explicit symbol list being typed.
+    line_symbols: HashMap<(usize, usize), String>,
 }
 
 /// The settings window's state.
@@ -316,6 +318,13 @@ impl SettingsApp {
         });
         ui.separator();
         let skins: Vec<String> = self.library.ids().map(str::to_owned).collect();
+        let titles: Vec<String> = self
+            .config
+            .watchlist
+            .iter()
+            .flatten()
+            .filter_map(|g| g.title.clone())
+            .collect();
         let mut remove = None;
         for i in 0..self.config.banners.len() {
             let title = format!(
@@ -333,6 +342,8 @@ impl SettingsApp {
                         &mut self.config.banners[i],
                         &mut self.drafts.displays[i],
                         &skins,
+                        &titles,
+                        &mut self.drafts.line_symbols,
                     ) {
                         remove = Some(i);
                     }
@@ -693,16 +704,21 @@ fn default_line() -> LineConfig {
         strategy: StrategyKind::Demo,
         content: Content::Quotes,
         messages: Vec::new(),
+        groups: Vec::new(),
+        symbols: Vec::new(),
     }
 }
 
 /// Edits one banner; returns true when "Remove banner" was clicked.
+#[allow(clippy::too_many_arguments)]
 fn banner_editor(
     ui: &mut egui::Ui,
     index: usize,
     banner: &mut BannerConfig,
     draft: &mut (String, String),
     skins: &[String],
+    titles: &[String],
+    symbol_drafts: &mut HashMap<(usize, usize), String>,
 ) -> bool {
     let mut remove = false;
     egui::Grid::new(("banner-grid", index)).num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
@@ -844,7 +860,24 @@ fn banner_editor(
                     };
                 }
             });
+            if line.content != Content::Headlines {
+                quotes_from(
+                    ui,
+                    line,
+                    titles,
+                    symbol_drafts.entry((index, l)).or_insert_with(|| {
+                        line.symbols
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }),
+                );
+            }
         });
+    }
+    if swap.is_some() || remove_line.is_some() {
+        symbol_drafts.retain(|(b, _), _| *b != index);
     }
     if let Some((a, b)) = swap {
         banner.lines.swap(a, b);
@@ -863,6 +896,53 @@ fn banner_editor(
     });
     ui.add_space(6.0);
     remove
+}
+
+/// Which quotes a line shows: watchlist groups (checkboxes) and/or an
+/// explicit symbol list, which wins when given.
+fn quotes_from(ui: &mut egui::Ui, line: &mut LineConfig, titles: &[String], draft: &mut String) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Quotes from");
+        if titles.is_empty() {
+            ui.label(
+                egui::RichText::new(
+                    "the whole watchlist (make your own on the Watchlist tab to pick groups)",
+                )
+                .weak(),
+            );
+        } else {
+            let mut all = line.groups.is_empty();
+            if ui.checkbox(&mut all, "all groups").changed() && all {
+                line.groups.clear();
+            }
+            for title in titles {
+                let mut on = line.groups.iter().any(|g| g.eq_ignore_ascii_case(title));
+                if ui.checkbox(&mut on, title).changed() {
+                    if on {
+                        line.groups.push(title.clone());
+                    } else {
+                        line.groups.retain(|g| !g.eq_ignore_ascii_case(title));
+                    }
+                }
+            }
+        }
+        let label = ui.label("or only symbols");
+        if ui
+            .add(
+                egui::TextEdit::singleline(draft)
+                    .hint_text("e.g. AAPL, MSFT")
+                    .desired_width(200.0),
+            )
+            .labelled_by(label.id)
+            .changed()
+            && let Ok(symbols) = parse_symbols(draft)
+        {
+            line.symbols = symbols;
+        }
+        if let Err(e) = parse_symbols(draft) {
+            ui.colored_label(ui.visuals().error_fg_color, e);
+        }
+    });
 }
 
 fn apply_displays(banner: &mut BannerConfig, draft: &(String, String)) {
@@ -1022,5 +1102,33 @@ mod label_ui_tests {
         let labels = &h.state().config().labels;
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].0.to_string(), "OANDA:XAU_USD");
+    }
+}
+
+#[cfg(test)]
+mod per_line_ui_tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn picking_groups_and_symbols_for_a_line() {
+        let config = Config::parse(
+            "[[watchlist]]\ntitle = \"Indices\"\nsymbols = [\"SPY\"]\n[[watchlist]]\ntitle = \"Tech\"\nsymbols = [\"AAPL\"]\n[[banner]]",
+        )
+        .unwrap();
+        let path =
+            std::env::temp_dir().join(format!("stocktape-ui-{}-perline.toml", std::process::id()));
+        let app = SettingsApp::new(path, config, SkinLibrary::builtin(), None);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .build_ui_state(|ui, app: &mut SettingsApp| app.ui(ui), app);
+        h.run();
+        h.get_by_label("Tech").click();
+        h.run();
+        assert_eq!(h.state().config().banners[0].lines[0].groups, ["Tech"]);
+        h.get_by_label("all groups").click();
+        h.run();
+        assert!(h.state().config().banners[0].lines[0].groups.is_empty());
     }
 }

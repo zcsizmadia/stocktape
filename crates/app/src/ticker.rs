@@ -326,6 +326,28 @@ pub fn demo_groups() -> Vec<Group> {
     ]
 }
 
+/// The part of the watchlist a line shows: its own symbols if it lists any,
+/// else the groups it names (by title, case-insensitive), else everything.
+pub fn line_groups(all: &[Group], names: &[String], symbols: &[Symbol]) -> Vec<Group> {
+    if !symbols.is_empty() {
+        return vec![Group {
+            title: None,
+            symbols: symbols.to_vec(),
+        }];
+    }
+    if names.is_empty() {
+        return all.to_vec();
+    }
+    all.iter()
+        .filter(|g| {
+            g.title
+                .as_deref()
+                .is_some_and(|t| names.iter().any(|n| n.eq_ignore_ascii_case(t)))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Builds a line's strategy: quotes chosen by `kind` over `groups`,
 /// headlines, or both, with the line's own messages mixed in now and then.
 fn strategy(
@@ -433,7 +455,13 @@ impl LineRuntime {
             snap: Snap::None,
         };
         Self {
-            strategy: strategy(spec.strategy, spec.content, &spec.messages, seed, groups),
+            strategy: strategy(
+                spec.strategy,
+                spec.content,
+                &spec.messages,
+                seed,
+                &line_groups(groups, &spec.groups, &spec.symbols),
+            ),
             belt: Belt::new(config, clock.monotonic()),
             renderer: SegmentRenderer::new(spec.style.clone()),
             local_tz: jiff::tz::TimeZone::system(),
@@ -575,6 +603,10 @@ pub struct LineSpec {
     pub content: Content,
     /// Text messages mixed in now and then.
     pub messages: Vec<String>,
+    /// Only these watchlist groups (by title); empty means all.
+    pub groups: Vec<String>,
+    /// Only these symbols; empty means the groups.
+    pub symbols: Vec<Symbol>,
     /// Scroll speed in logical pixels per second.
     pub speed: f64,
     /// The line's look; its height is the line's thickness.
@@ -629,6 +661,8 @@ impl BannerRuntime {
                 strategy: kind,
                 content: Content::Quotes,
                 messages: Vec::new(),
+                groups: Vec::new(),
+                symbols: Vec::new(),
                 speed,
                 style,
             }],
@@ -971,6 +1005,8 @@ mod tests {
                     strategy: StrategyKind::Movers,
                     content: Content::Quotes,
                     messages: Vec::new(),
+                    groups: Vec::new(),
+                    symbols: Vec::new(),
                     speed: 300.0,
                     style: style("classic-dark"),
                 },
@@ -978,6 +1014,8 @@ mod tests {
                     strategy: StrategyKind::Watchlist,
                     content: Content::Quotes,
                     messages: Vec::new(),
+                    groups: Vec::new(),
+                    symbols: Vec::new(),
                     speed: 100.0,
                     style: style("daylight"),
                 },
@@ -1086,6 +1124,46 @@ mod tests {
     }
 
     #[test]
+    fn lines_draw_from_their_own_groups_or_symbols() {
+        let all = demo_groups();
+        let crypto = line_groups(&all, &["crypto".to_owned()], &[]);
+        assert_eq!(crypto.len(), 1);
+        assert_eq!(crypto[0].symbols[0].to_string(), "BTC-USD");
+        let picked = line_groups(&all, &["Crypto".to_owned()], &[sym("AAPL")]);
+        assert_eq!(picked[0].symbols, [sym("AAPL")], "symbols win over groups");
+        assert_eq!(line_groups(&all, &[], &[]).len(), all.len());
+        assert!(line_groups(&all, &["Nope".to_owned()], &[]).is_empty());
+
+        // A line limited to Crypto only ever shows BTC-USD.
+        let clock = clock();
+        let mut market = Market::demo(8);
+        let mut b = BannerRuntime::new(
+            &[LineSpec {
+                strategy: StrategyKind::Watchlist,
+                content: Content::Quotes,
+                messages: Vec::new(),
+                groups: vec!["Crypto".to_owned()],
+                symbols: Vec::new(),
+                speed: 900.0,
+                style: BannerStyle::default(),
+            }],
+            &all,
+            1,
+            &clock,
+        );
+        run(&mut market, &mut b, &clock, 2000.0, 120);
+        let shown: HashSet<String> = b.lines[0]
+            .entries
+            .values()
+            .filter_map(|e| match &e.content {
+                Piece::Quote(q) => Some(q.symbol.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shown, HashSet::from(["BTC-USD".to_owned()]));
+    }
+
+    #[test]
     fn labels_rename_and_reformat_quotes() {
         let quote = stocktape_core::Quote::new(
             "OANDA:EUR_USD".parse().unwrap(),
@@ -1161,6 +1239,8 @@ mod tests {
                 strategy: StrategyKind::Demo,
                 content: Content::Headlines,
                 messages: vec!["Hello".to_owned()],
+                groups: Vec::new(),
+                symbols: Vec::new(),
                 speed: 600.0,
                 style,
             }],

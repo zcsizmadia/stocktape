@@ -156,6 +156,28 @@ fn line_table(t: &mut Table, line: &LineConfig) {
     if line.content != Content::Quotes {
         t.insert("content".into(), Value::String(line.content.name().into()));
     }
+    if !line.groups.is_empty() {
+        t.insert(
+            "groups".into(),
+            Value::Array(
+                line.groups
+                    .iter()
+                    .map(|g| Value::String(g.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    if !line.symbols.is_empty() {
+        t.insert(
+            "symbols".into(),
+            Value::Array(
+                line.symbols
+                    .iter()
+                    .map(|s| Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+    }
     if !line.messages.is_empty() {
         t.insert(
             "messages".into(),
@@ -434,6 +456,9 @@ mod tests {
             skin = "daylight"
             content = "mixed"
             messages = ["Markets close at 4 PM", "Hello"]
+            groups = ["Tech"]
+            [[banner.line]]
+            symbols = ["MSFT", "XLON:VOD"]
 
             [[banner]]
             content = "headlines"

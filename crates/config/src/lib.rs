@@ -49,6 +49,10 @@ pub struct LineConfig {
     pub content: Content,
     /// Your own text messages, mixed in now and then.
     pub messages: Vec<String>,
+    /// Only these watchlist groups (by title); empty means all.
+    pub groups: Vec<String>,
+    /// Only these symbols; empty means the groups (or the whole watchlist).
+    pub symbols: Vec<Symbol>,
 }
 
 /// What a line shows.
@@ -281,10 +285,12 @@ impl Config {
         if banners.is_empty() {
             return Err("no banners: add a [[banner]] table".to_owned());
         }
+        let watchlist = watchlist(&table)?;
+        check_groups(&banners, watchlist.as_deref())?;
         Ok(Self {
             banners,
             feeds: feeds(&table)?,
-            watchlist: watchlist(&table)?,
+            watchlist,
             news: news(&table)?,
             labels: labels(&table)?,
         })
@@ -293,7 +299,7 @@ impl Config {
 
 const KEYS: &[&str] = &[
     "name", "place", "displays", "exclude", "dock", "skin", "speed", "offset", "inset", "reverse",
-    "strategy", "content", "messages", "line",
+    "strategy", "content", "messages", "groups", "symbols", "line",
 ];
 
 fn number(t: &Table, key: &str, default: f64, min: f64, max: f64) -> Result<f64, String> {
@@ -433,6 +439,8 @@ fn banner(t: &Table) -> Result<BannerConfig, String> {
         strategy: strategy(t, StrategyKind::Demo)?,
         content: content(t, Content::Quotes)?,
         messages: messages(t, &[])?,
+        groups: string_list(t, "groups", &[])?,
+        symbols: symbol_list(t, &[])?,
     };
     let lines = match t.get("line") {
         None => vec![default],
@@ -476,7 +484,67 @@ fn strategy(t: &Table, default: StrategyKind) -> Result<StrategyKind, String> {
     }
 }
 
-const LINE_KEYS: &[&str] = &["skin", "speed", "strategy", "content", "messages"];
+const LINE_KEYS: &[&str] = &[
+    "skin", "speed", "strategy", "content", "messages", "groups", "symbols",
+];
+
+fn string_list(t: &Table, key: &str, default: &[String]) -> Result<Vec<String>, String> {
+    match t.get(key) {
+        None => Ok(default.to_vec()),
+        Some(Value::Array(list)) => list
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("`{key}` must be a list of strings"))
+            })
+            .collect(),
+        Some(_) => Err(format!("`{key}` must be a list of strings")),
+    }
+}
+
+fn symbol_list(t: &Table, default: &[Symbol]) -> Result<Vec<Symbol>, String> {
+    if t.get("symbols").is_none() {
+        return Ok(default.to_vec());
+    }
+    string_list(t, "symbols", &[])?
+        .iter()
+        .map(|s| {
+            s.parse::<Symbol>()
+                .map_err(|e| format!("`symbols`: {s:?}: {e}"))
+        })
+        .collect()
+}
+
+/// Checks that every line's `groups` names a watchlist group (when there is
+/// a watchlist of your own; the demo list is checked by the app).
+fn check_groups(banners: &[BannerConfig], watchlist: Option<&[Group]>) -> Result<(), String> {
+    let Some(groups) = watchlist else {
+        return Ok(());
+    };
+    for (b, banner) in banners.iter().enumerate() {
+        for (l, line) in banner.lines.iter().enumerate() {
+            for name in &line.groups {
+                let known = groups.iter().any(|g| {
+                    g.title
+                        .as_deref()
+                        .is_some_and(|t| t.eq_ignore_ascii_case(name))
+                });
+                if !known {
+                    let titles: Vec<&str> =
+                        groups.iter().filter_map(|g| g.title.as_deref()).collect();
+                    return Err(format!(
+                        "banner {}: line {}: no watchlist group {name:?}; groups: {}",
+                        b + 1,
+                        l + 1,
+                        titles.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 fn content(t: &Table, default: Content) -> Result<Content, String> {
     let Some(value) = t.get("content") else {
@@ -612,6 +680,8 @@ fn parse_line(t: &Table, default: &LineConfig) -> Result<LineConfig, String> {
         strategy: strategy(t, default.strategy)?,
         content: content(t, default.content)?,
         messages: messages(t, &default.messages)?,
+        groups: string_list(t, "groups", &default.groups)?,
+        symbols: symbol_list(t, &default.symbols)?,
     })
 }
 
@@ -651,6 +721,8 @@ mod tests {
                 strategy: StrategyKind::Demo,
                 content: Content::Quotes,
                 messages: Vec::new(),
+                groups: Vec::new(),
+                symbols: Vec::new(),
             }]
         );
     }
@@ -742,6 +814,8 @@ dock = 1"
                 strategy: StrategyKind::Movers,
                 content: Content::Quotes,
                 messages: Vec::new(),
+                groups: Vec::new(),
+                symbols: Vec::new(),
             }
         );
         assert_eq!(
@@ -752,6 +826,8 @@ dock = 1"
                 strategy: StrategyKind::Demo,
                 content: Content::Quotes,
                 messages: Vec::new(),
+                groups: Vec::new(),
+                symbols: Vec::new(),
             }
         );
         let err = Config::parse("[[banner]]\n[[banner.line]]\nsped = 3").unwrap_err();
@@ -1288,5 +1364,40 @@ mod label_tests {
             err("[[banner]]\n[labels]\nX = { colour = \"red\" }").contains("unknown key `colour`")
         );
         assert!(err("[[banner]]\n[labels]\nX = 5").contains("must be a name"));
+    }
+}
+
+#[cfg(test)]
+mod per_line_tests {
+    use super::*;
+
+    const WATCHLIST: &str = "[[watchlist]]\ntitle = \"Indices\"\nsymbols = [\"SPY\"]\n[[watchlist]]\ntitle = \"Tech\"\nsymbols = [\"AAPL\"]\n";
+
+    #[test]
+    fn lines_pick_groups_or_symbols() {
+        let c = Config::parse(&format!(
+            "{WATCHLIST}[[banner]]\n[[banner.line]]\ngroups = [\"indices\"]\n[[banner.line]]\nsymbols = [\"MSFT\", \"XLON:VOD\"]\n"
+        ))
+        .unwrap();
+        let lines = &c.banners[0].lines;
+        assert_eq!(lines[0].groups, ["indices"]);
+        assert!(lines[0].symbols.is_empty());
+        assert_eq!(lines[1].symbols.len(), 2);
+        assert_eq!(lines[1].symbols[1].to_string(), "XLON:VOD");
+    }
+
+    #[test]
+    fn unknown_groups_and_bad_symbols_are_errors() {
+        let err =
+            Config::parse(&format!("{WATCHLIST}[[banner]]\ngroups = [\"Crypto\"]")).unwrap_err();
+        assert!(
+            err.contains("banner 1: line 1: no watchlist group \"Crypto\""),
+            "{err}"
+        );
+        assert!(err.contains("Indices, Tech"), "{err}");
+        let err = Config::parse("[[banner]]\nsymbols = [\"A B\"]").unwrap_err();
+        assert!(err.contains("`symbols`"), "{err}");
+        // Without a watchlist of your own, groups refer to the demo list.
+        assert!(Config::parse("[[banner]]\ngroups = [\"Crypto\"]").is_ok());
     }
 }
