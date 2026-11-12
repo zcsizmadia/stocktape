@@ -1,8 +1,9 @@
-//! The demo window: one borderless, always-on-top banner along the bottom of
-//! the primary display, drawn on the CPU and presented with `softbuffer`, so
-//! it runs without a GPU.
+//! Banner windows: one borderless, always-on-top window per banner segment,
+//! drawn on the CPU and presented with `softbuffer`, so no GPU is needed.
 //!
-//! Docking (reserving screen space) and multiple banners come later (#7, #8).
+//! Displays are re-scanned every couple of seconds; when they change (a
+//! monitor plugged in, unplugged, rearranged or rescaled) every banner is laid
+//! out again. Docking (reserving screen space) comes later (#8).
 
 use std::error::Error;
 use std::num::NonZeroU32;
@@ -13,8 +14,11 @@ use std::time::{Duration, Instant};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use stocktape_core::SystemClock;
+use stocktape_layout::{BannerLayout, Display, Rect, Segment, plan};
 use stocktape_render::BannerStyle;
+use stocktape_render::frame::present_strip;
 use stocktape_skin::SkinLibrary;
+use tiny_skia::Pixmap;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -22,20 +26,13 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
-use crate::ticker::Ticker;
+use crate::config::{BannerConfig, Config};
+use crate::ticker::{BannerRuntime, Market};
 
-/// Scroll speed of the demo, in logical pixels per second.
-const SPEED: f64 = 120.0;
-/// Frame interval when the monitor doesn't report its refresh rate.
+/// Frame interval when no display reports its refresh rate.
 const DEFAULT_FRAME: Duration = Duration::from_micros(16_667);
-
-struct Banner {
-    window: Rc<Window>,
-    surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
-    ticker: Ticker,
-    frame_interval: Duration,
-    next_frame: Instant,
-}
+/// How often displays are re-scanned for changes.
+const DISPLAY_SCAN: Duration = Duration::from_secs(2);
 
 /// Watches a skins folder and reports when anything in it changes.
 struct SkinWatch {
@@ -67,116 +64,208 @@ impl SkinWatch {
     }
 }
 
+/// One window showing one segment of one banner.
+struct SegmentWindow {
+    banner: usize,
+    segment: Segment,
+    window: Rc<Window>,
+    surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
+    strip: Option<Pixmap>,
+}
+
+struct Banner {
+    config: BannerConfig,
+    runtime: BannerRuntime,
+    layout: Option<BannerLayout>,
+}
+
 struct App {
     clock: SystemClock,
-    style: BannerStyle,
-    skin: String,
+    market: Market,
+    banners: Vec<Banner>,
     watch: Option<SkinWatch>,
-    banner: Option<Banner>,
+    windows: Vec<SegmentWindow>,
+    displays: Vec<Display>,
+    last_scan: Option<Instant>,
+    frame_interval: Duration,
+    next_frame: Instant,
     error: Option<Box<dyn Error>>,
 }
 
+/// The current displays as layout data.
+fn scan(event_loop: &ActiveEventLoop) -> Vec<Display> {
+    let primary = event_loop.primary_monitor();
+    event_loop
+        .available_monitors()
+        .enumerate()
+        .map(|(i, m)| {
+            let (pos, size) = (m.position(), m.size());
+            Display {
+                name: m.name().unwrap_or_else(|| format!("display {i}")),
+                rect: Rect::new(pos.x, pos.y, size.width, size.height),
+                scale: m.scale_factor(),
+                primary: primary.as_ref() == Some(&m),
+            }
+        })
+        .collect()
+}
+
+fn refresh_interval(event_loop: &ActiveEventLoop) -> Duration {
+    // Pace to the fastest display so no banner looks choppy.
+    event_loop
+        .available_monitors()
+        .filter_map(|m| m.refresh_rate_millihertz())
+        .filter(|mhz| *mhz >= 10_000)
+        .max()
+        .map_or(DEFAULT_FRAME, |mhz| {
+            Duration::from_secs_f64(1000.0 / f64::from(mhz))
+        })
+}
+
+fn create_window(
+    event_loop: &ActiveEventLoop,
+    banner: usize,
+    name: &str,
+    segment: &Segment,
+) -> Result<SegmentWindow, Box<dyn Error>> {
+    let r = segment.rect;
+    #[allow(unused_mut)]
+    let mut attributes = Window::default_attributes()
+        .with_title(format!("stocktape: {name}"))
+        .with_decorations(false)
+        .with_resizable(false)
+        .with_window_level(WindowLevel::AlwaysOnTop)
+        .with_inner_size(PhysicalSize::new(r.width, r.height))
+        .with_position(PhysicalPosition::new(r.x, r.y));
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        // One taskbar button per segment would be noise.
+        attributes = attributes.with_skip_taskbar(true);
+    }
+    let window = Rc::new(event_loop.create_window(attributes)?);
+    let context = softbuffer::Context::new(window.clone())?;
+    let surface = softbuffer::Surface::new(&context, window.clone())?;
+    Ok(SegmentWindow {
+        banner,
+        segment: segment.clone(),
+        window,
+        surface,
+        strip: None,
+    })
+}
+
 impl App {
-    /// Re-reads the skins folder and restyles the banner. On error the current
-    /// look stays and the problem is printed, so a half-typed edit never
-    /// closes the app.
-    fn reload_skin(&mut self) {
-        let Some(watch) = &self.watch else { return };
-        if !watch.changed() {
-            return;
-        }
-        let mut library = SkinLibrary::builtin();
-        let result = library
-            .load_dir(&watch.dir)
-            .map_err(|e| e.to_string())
-            .and_then(|_| library.resolve(&self.skin).map_err(|e| e.to_string()));
-        match result {
-            Ok(skin) => {
-                self.style = BannerStyle::from(&skin);
-                eprintln!("reloaded skin `{}`", skin.id);
-                if let Some(banner) = &mut self.banner {
-                    banner.ticker.set_style(self.style.clone());
-                    let width = banner.window.inner_size().width;
-                    let height = banner.ticker.height_px();
-                    let _ = banner
-                        .window
-                        .request_inner_size(PhysicalSize::new(width, height));
-                    if let (Ok(pos), Some(monitor)) = (
-                        banner.window.outer_position(),
-                        banner.window.current_monitor(),
-                    ) {
-                        let bottom = monitor.position().y
-                            + i32::try_from(monitor.size().height.saturating_sub(height))
-                                .unwrap_or(0);
-                        banner
-                            .window
-                            .set_outer_position(PhysicalPosition::new(pos.x, bottom));
+    /// Lays out every banner on the current displays and (re)creates windows.
+    fn relayout(&mut self, event_loop: &ActiveEventLoop) -> Result<(), Box<dyn Error>> {
+        self.windows.clear();
+        for (index, banner) in self.banners.iter_mut().enumerate() {
+            let options = stocktape_layout::PlacementOptions {
+                thickness: banner.runtime.thickness(),
+                ..banner.config.options.clone()
+            };
+            match plan(&self.displays, &banner.config.placement, &options) {
+                Ok(layout) => {
+                    let scale = layout.segments.iter().map(|s| s.scale).fold(1.0, f64::max);
+                    banner.runtime.set_measure_scale(scale);
+                    for segment in &layout.segments {
+                        self.windows.push(create_window(
+                            event_loop,
+                            index,
+                            &banner.config.name,
+                            segment,
+                        )?);
                     }
+                    banner.layout = Some(layout);
+                }
+                Err(e) => {
+                    eprintln!("banner `{}` not shown: {e}", banner.config.name);
+                    banner.layout = None;
                 }
             }
-            Err(e) => eprintln!("skin not reloaded: {e}"),
         }
+        if self.windows.is_empty() {
+            return Err("no banner fits on the current displays".into());
+        }
+        self.frame_interval = refresh_interval(event_loop);
+        Ok(())
     }
 
-    fn create_banner(&self, event_loop: &ActiveEventLoop) -> Result<Banner, Box<dyn Error>> {
-        let monitor = event_loop
-            .primary_monitor()
-            .or_else(|| event_loop.available_monitors().next())
-            .ok_or("no display found")?;
-        #[allow(clippy::cast_possible_truncation)]
-        let scale = monitor.scale_factor() as f32;
-        let ticker = Ticker::demo(seed(), SPEED, scale, self.style.clone(), &self.clock);
-        let height = ticker.height_px();
-        let size = monitor.size();
-        let position = monitor.position();
-        let attributes = Window::default_attributes()
-            .with_title("stocktape")
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_window_level(WindowLevel::AlwaysOnTop)
-            .with_inner_size(PhysicalSize::new(size.width, height))
-            .with_position(PhysicalPosition::new(
-                position.x,
-                position.y + i32::try_from(size.height.saturating_sub(height)).unwrap_or(0),
-            ));
-        let window = Rc::new(event_loop.create_window(attributes)?);
-        let context = softbuffer::Context::new(window.clone())?;
-        let surface = softbuffer::Surface::new(&context, window.clone())?;
-        let frame_interval = monitor
-            .refresh_rate_millihertz()
-            .filter(|mhz| *mhz >= 10_000)
-            .map_or(DEFAULT_FRAME, |mhz| {
-                Duration::from_secs_f64(1000.0 / f64::from(mhz))
-            });
-        Ok(Banner {
-            window,
-            surface,
-            ticker,
-            frame_interval,
-            next_frame: Instant::now(),
-        })
+    /// Re-scans displays and lays out again if anything changed.
+    fn check_displays(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        force: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        let now = Instant::now();
+        if !force && self.last_scan.is_some_and(|t| now - t < DISPLAY_SCAN) {
+            return Ok(());
+        }
+        self.last_scan = Some(now);
+        let displays = scan(event_loop);
+        if force || displays != self.displays {
+            self.displays = displays;
+            self.relayout(event_loop)?;
+        }
+        Ok(())
     }
 
-    fn draw(&mut self) -> Result<(), Box<dyn Error>> {
-        let Some(banner) = self.banner.as_mut() else {
+    /// Re-reads the skins folder and restyles every banner. On error the
+    /// current look stays and the problem is printed.
+    fn reload_skins(&mut self, event_loop: &ActiveEventLoop) -> Result<(), Box<dyn Error>> {
+        let Some(watch) = &self.watch else {
             return Ok(());
         };
-        let size = banner.window.inner_size();
+        if !watch.changed() {
+            return Ok(());
+        }
+        let mut library = SkinLibrary::builtin();
+        if let Err(e) = library.load_dir(&watch.dir) {
+            eprintln!("skins not reloaded: {e}");
+            return Ok(());
+        }
+        let mut styles = Vec::new();
+        for banner in &self.banners {
+            match library.resolve(&banner.config.skin) {
+                Ok(skin) => styles.push(BannerStyle::from(&skin)),
+                Err(e) => {
+                    eprintln!("skins not reloaded: {e}");
+                    return Ok(());
+                }
+            }
+        }
+        for (banner, style) in self.banners.iter_mut().zip(styles) {
+            banner.runtime.set_style(style);
+        }
+        eprintln!("reloaded skins");
+        // Thickness may have changed.
+        self.check_displays(event_loop, true)
+    }
+
+    fn draw(&mut self, id: WindowId) -> Result<(), Box<dyn Error>> {
+        let Some(w) = self.windows.iter_mut().find(|w| w.window.id() == id) else {
+            return Ok(());
+        };
+        let size = w.window.inner_size();
         let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         else {
             return Ok(());
         };
-        banner.surface.resize(width, height)?;
-        let frame = banner.ticker.frame(&self.clock, width.get());
-        let mut buffer = banner.surface.buffer_mut()?;
-        let shown = (frame.width() * frame.height().min(height.get())) as usize;
-        let shown = shown.min(buffer.len());
-        let (top, rest) = buffer.split_at_mut(shown);
-        for (out, px) in top.iter_mut().zip(frame.data().as_chunks::<4>().0) {
-            *out = (u32::from(px[0]) << 16) | (u32::from(px[1]) << 8) | u32::from(px[2]);
+        w.surface.resize(width, height)?;
+        self.banners[w.banner]
+            .runtime
+            .render_segment(&w.segment, &mut w.strip);
+        let mut buffer = w.surface.buffer_mut()?;
+        if let Some(strip) = &w.strip {
+            present_strip(
+                strip,
+                w.segment.flow,
+                &mut buffer,
+                width.get(),
+                height.get(),
+            );
         }
-        rest.fill(0);
         buffer.present()?;
         Ok(())
     }
@@ -189,15 +278,14 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.banner.is_none() {
-            match self.create_banner(event_loop) {
-                Ok(banner) => self.banner = Some(banner),
-                Err(e) => self.fail(event_loop, e),
-            }
+        if self.windows.is_empty()
+            && let Err(e) = self.check_displays(event_loop, true)
+        {
+            self.fail(event_loop, e);
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested
             | WindowEvent::KeyboardInput {
@@ -209,14 +297,12 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => event_loop.exit(),
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                if let Some(banner) = self.banner.as_mut() {
-                    #[allow(clippy::cast_possible_truncation)]
-                    banner.ticker.set_scale(scale_factor as f32);
-                }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                // A display's scale changed: lay out again on the next scan.
+                self.last_scan = None;
             }
             WindowEvent::RedrawRequested => {
-                if let Err(e) = self.draw() {
+                if let Err(e) = self.draw(id) {
                     self.fail(event_loop, e);
                 }
             }
@@ -225,22 +311,36 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.reload_skin();
-        // Redraw only when a frame is due; requesting a redraw on every wake-up
-        // would spin the event loop at full CPU.
-        if let Some(banner) = &mut self.banner {
-            let now = Instant::now();
-            if now >= banner.next_frame {
-                banner.window.request_redraw();
-                let next = banner.next_frame + banner.frame_interval;
-                banner.next_frame = if next > now {
-                    next
-                } else {
-                    now + banner.frame_interval
-                };
-            }
-            event_loop.set_control_flow(ControlFlow::WaitUntil(banner.next_frame));
+        if let Err(e) = self
+            .reload_skins(event_loop)
+            .and_then(|()| self.check_displays(event_loop, false))
+        {
+            self.fail(event_loop, e);
+            return;
         }
+        // Advance once per frame, then let every window draw its stretch.
+        // Requesting redraws on every wake-up would spin the CPU.
+        let now = Instant::now();
+        if now >= self.next_frame {
+            self.market.poll(&self.clock);
+            for banner in &mut self.banners {
+                if let Some(layout) = &banner.layout {
+                    banner
+                        .runtime
+                        .update(&self.market, &self.clock, layout.belt_len());
+                }
+            }
+            for w in &self.windows {
+                w.window.request_redraw();
+            }
+            let next = self.next_frame + self.frame_interval;
+            self.next_frame = if next > now {
+                next
+            } else {
+                now + self.frame_interval
+            };
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
     }
 }
 
@@ -251,27 +351,49 @@ fn seed() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Opens the demo banner and runs until it is closed (Esc or the window
-/// manager's close).
-///
-/// `skin` defaults to the library's default; with `skins_dir`, edits to the
-/// files there restyle the banner live.
+/// Opens the configured banners and runs until closed (Esc on any banner, or
+/// the window manager's close). With `skins_dir`, skin edits apply live.
 pub fn run(
+    config: Config,
     library: SkinLibrary,
-    skin: Option<String>,
     skins_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
-    let skin = skin.unwrap_or_else(|| SkinLibrary::DEFAULT.to_owned());
-    // Fail before opening a window if the skin is broken.
-    let style = BannerStyle::from(&library.resolve(&skin)?);
+    let clock = SystemClock::new();
+    let seed = seed();
+    // Fail before opening any window if a skin is broken.
+    let banners = config
+        .banners
+        .into_iter()
+        .enumerate()
+        .map(|(i, config)| {
+            let style = BannerStyle::from(&library.resolve(&config.skin)?);
+            let runtime = BannerRuntime::new(
+                config.strategy,
+                seed + i as u64,
+                config.speed,
+                style,
+                &clock,
+            );
+            Ok(Banner {
+                config,
+                runtime,
+                layout: None,
+            })
+        })
+        .collect::<Result<Vec<_>, stocktape_skin::SkinError>>()?;
     let watch = skins_dir.map(SkinWatch::new).transpose()?;
     let event_loop = EventLoop::new()?;
     let mut app = App {
-        clock: SystemClock::new(),
-        style,
-        skin,
+        clock,
+        market: Market::demo(seed),
+        banners,
+
         watch,
-        banner: None,
+        windows: Vec::new(),
+        displays: Vec::new(),
+        last_scan: None,
+        frame_interval: DEFAULT_FRAME,
+        next_frame: Instant::now(),
         error: None,
     };
     event_loop.run_app(&mut app)?;

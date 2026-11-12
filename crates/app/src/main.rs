@@ -5,14 +5,21 @@ use std::process::ExitCode;
 
 use stocktape_skin::{SkinLibrary, SkinSource};
 
+mod config;
 mod ticker;
 mod window;
+
+use config::Config;
 
 /// Command-line options.
 #[derive(Debug, Default, PartialEq)]
 struct Options {
-    /// Skin id; the default skin when `None`.
+    /// Skin id for every banner, overriding the configuration.
     skin: Option<String>,
+    /// Banner configuration file.
+    config: Option<PathBuf>,
+    /// Built-in layout preset, used when there is no configuration file.
+    layout: Option<String>,
     /// Folder with user skins (`*.toml`), watched for changes.
     skins_dir: Option<PathBuf>,
     /// Write a demo frame to this PNG instead of opening a window.
@@ -27,6 +34,7 @@ enum Command {
     Run(Options),
     Preview(Options),
     ListSkins(Options),
+    ListLayouts,
     Version,
     Help,
 }
@@ -41,7 +49,10 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String
             "-V" | "--version" => return Ok(Command::Version),
             "-h" | "--help" => return Ok(Command::Help),
             "--list-skins" => list = true,
+            "--list-layouts" => return Ok(Command::ListLayouts),
             "--skin" => options.skin = Some(value("--skin")?),
+            "--config" => options.config = Some(PathBuf::from(value("--config")?)),
+            "--layout" => options.layout = Some(value("--layout")?),
             "--skins-dir" => options.skins_dir = Some(PathBuf::from(value("--skins-dir")?)),
             "--preview" => options.preview = Some(PathBuf::from(value("--preview")?)),
             "--width" => {
@@ -54,6 +65,9 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String
             }
             other => return Err(format!("unknown argument: {other}")),
         }
+    }
+    if options.config.is_some() && options.layout.is_some() {
+        return Err("use either --config or --layout, not both".to_owned());
     }
     Ok(if list {
         Command::ListSkins(options)
@@ -74,10 +88,13 @@ A broadcast-style scrolling stock ticker for the desktop.
 Usage: stocktape [OPTIONS]
 
 Without options, shows a demo banner with sample (not real) prices along the
-bottom of the primary display. Press Esc while it has focus to quit.
+bottom of the primary display. Press Esc while a banner has focus to quit.
 
 Options:
-      --skin <NAME>       Skin to use (see --list-skins)
+      --config <FILE>     Banner configuration (see docs/configuration.md)
+      --layout <NAME>     Built-in layout preset (see --list-layouts)
+      --list-layouts      List layout presets and exit
+      --skin <NAME>       Skin for every banner (see --list-skins)
       --skins-dir <DIR>   Load extra skins from DIR (*.toml); edits reload live
       --list-skins        List available skins and exit
       --preview <FILE>    Write a demo frame to a PNG file instead of opening a window
@@ -94,6 +111,26 @@ fn library(options: &Options) -> Result<SkinLibrary, String> {
             .map_err(|e| format!("can't read skins from {}: {e}", dir.display()))?;
     }
     Ok(library)
+}
+
+/// Loads the banner configuration: `--config`, else `--layout`, else the
+/// `bottom` preset; `--skin` overrides every banner's skin.
+fn config(options: &Options) -> Result<Config, String> {
+    let mut config = match (&options.config, &options.layout) {
+        (Some(path), _) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("can't read {}: {e}", path.display()))?;
+            Config::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?
+        }
+        (None, Some(name)) => Config::preset(name)?,
+        (None, None) => Config::preset("bottom")?,
+    };
+    if let Some(skin) = &options.skin {
+        for banner in &mut config.banners {
+            banner.skin.clone_from(skin);
+        }
+    }
+    Ok(config)
 }
 
 fn list_skins(options: &Options) -> Result<(), String> {
@@ -140,9 +177,16 @@ fn main() -> ExitCode {
             Ok(())
         }
         Ok(Command::ListSkins(options)) => list_skins(&options),
+        Ok(Command::ListLayouts) => {
+            for (name, description) in config::presets() {
+                println!("{name:<16} {description}");
+            }
+            Ok(())
+        }
         Ok(Command::Preview(options)) => preview(&options),
-        Ok(Command::Run(options)) => library(&options).and_then(|library| {
-            window::run(library, options.skin, options.skins_dir).map_err(|e| e.to_string())
+        Ok(Command::Run(options)) => config(&options).and_then(|config| {
+            let library = library(&options)?;
+            window::run(config, library, options.skins_dir).map_err(|e| e.to_string())
         }),
         Err(message) => {
             eprintln!("error: {message}\n\n{HELP}");

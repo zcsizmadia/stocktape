@@ -39,6 +39,7 @@ cargo test --workspace          # or: cargo nextest run --workspace
 cargo clippy --workspace --all-targets
 cargo run -- --help
 cargo run --release             # demo banner with sample (not real) prices; Esc quits
+cargo run --release -- --layout around     # see --list-layouts and docs/configuration.md
 ```
 
 No GPU is required: banners are drawn and composed on the CPU.

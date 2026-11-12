@@ -7,6 +7,8 @@
 
 use tiny_skia::Pixmap;
 
+use stocktape_layout::Flow;
+
 use crate::style::Rgba;
 
 /// Fills `frame` with `background` and draws each `(image, x)` at horizontal
@@ -88,6 +90,41 @@ pub fn to_xrgb(frame: &Pixmap, out: &mut [u32]) {
     }
 }
 
+/// Writes a horizontal strip (composed with the belt's leading end at x = 0
+/// for leftward and vertical flows, or at the right for rightward flow) into
+/// a window buffer of `out_width × out_height` `0x00RRGGBB` pixels, rotating
+/// it for vertical segments:
+///
+/// - `Left` / `Right`: copied as is; the window is `strip.width × strip.height`.
+/// - `Up`: turned clockwise, so the leading end is at the top and text reads
+///   top to bottom; the window is `strip.height × strip.width`.
+/// - `Down`: turned counter-clockwise, so the leading end is at the bottom and
+///   text reads bottom to top.
+///
+/// Pixels outside the strip are left black.
+pub fn present_strip(strip: &Pixmap, flow: Flow, out: &mut [u32], out_width: u32, out_height: u32) {
+    out.fill(0);
+    let (sw, sh) = (strip.width() as usize, strip.height() as usize);
+    let (ow, oh) = (out_width as usize, out_height as usize);
+    let px = strip.data().as_chunks::<4>().0;
+    let xrgb = |p: &[u8; 4]| (u32::from(p[0]) << 16) | (u32::from(p[1]) << 8) | u32::from(p[2]);
+    for y in 0..sh {
+        for x in 0..sw {
+            let (ox, oy) = match flow {
+                Flow::Left | Flow::Right => (x, y),
+                Flow::Up => (sh - 1 - y, x),
+                Flow::Down => (y, sw - 1 - x),
+            };
+            if ox < ow
+                && oy < oh
+                && let Some(slot) = out.get_mut(oy * ow + ox)
+            {
+                *slot = xrgb(&px[y * sw + x]);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +185,47 @@ mod tests {
         let [r, g, b, a] = pixel(&frame, 0, 0);
         assert_eq!((g, a), (0, 255));
         assert!(r.abs_diff(128) <= 1 && b.abs_diff(127) <= 1, "{r} {b}");
+    }
+
+    /// A 3×2 strip with distinct pixels: value = 10 × x + y.
+    fn numbered() -> Pixmap {
+        let mut p = Pixmap::new(3, 2).unwrap();
+        for y in 0..2u8 {
+            for x in 0..3u8 {
+                let i = (usize::from(y) * 3 + usize::from(x)) * 4;
+                p.data_mut()[i..i + 4].copy_from_slice(&[0, 0, 10 * x + y, 255]);
+            }
+        }
+        p
+    }
+
+    #[test]
+    fn present_horizontal() {
+        let mut out = [9u32; 6];
+        present_strip(&numbered(), Flow::Left, &mut out, 3, 2);
+        assert_eq!(out, [0, 10, 20, 1, 11, 21]);
+    }
+
+    #[test]
+    fn present_up_turns_clockwise() {
+        // Window is 2 wide, 3 tall; strip x runs down the window.
+        let mut out = [0u32; 6];
+        present_strip(&numbered(), Flow::Up, &mut out, 2, 3);
+        assert_eq!(out, [1, 0, 11, 10, 21, 20]);
+    }
+
+    #[test]
+    fn present_down_turns_counter_clockwise() {
+        let mut out = [0u32; 6];
+        present_strip(&numbered(), Flow::Down, &mut out, 2, 3);
+        assert_eq!(out, [20, 21, 10, 11, 0, 1]);
+    }
+
+    #[test]
+    fn present_clips_to_window() {
+        let mut out = [7u32; 2];
+        present_strip(&numbered(), Flow::Left, &mut out, 2, 1);
+        assert_eq!(out, [0, 10]);
     }
 
     #[test]
