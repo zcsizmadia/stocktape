@@ -18,6 +18,8 @@
 //! Several `[[banner]]` tables make several banners. Built-in presets cover
 //! the common layouts (`--layout top-bottom`, `span`, `around`, ...).
 
+use std::time::Duration;
+
 use stocktape_core::Symbol;
 use stocktape_layout::{DisplaySelector, Edge, Placement, PlacementOptions};
 use stocktape_strategies::Group;
@@ -588,6 +590,10 @@ pub struct FeedConfig {
     pub api_key: String,
     /// Provider names for symbols whose default mapping is wrong.
     pub names: Vec<(Symbol, String)>,
+    /// Time between snapshot rounds.
+    pub refresh: Duration,
+    /// Stream live trades; without it, only snapshots every `refresh`.
+    pub stream: bool,
 }
 
 impl std::fmt::Debug for FeedConfig {
@@ -597,6 +603,8 @@ impl std::fmt::Debug for FeedConfig {
             .field("provider", &self.provider)
             .field("api_key", &key)
             .field("names", &self.names)
+            .field("refresh", &self.refresh)
+            .field("stream", &self.stream)
             .finish()
     }
 }
@@ -610,7 +618,14 @@ pub enum Provider {
     Finnhub,
 }
 
-const FEED_KEYS: &[&str] = &["provider", "api_key", "api_key_env", "symbols"];
+const FEED_KEYS: &[&str] = &[
+    "provider",
+    "api_key",
+    "api_key_env",
+    "symbols",
+    "refresh",
+    "stream",
+];
 
 /// `[[feed]]` tables, primary first. The API key comes from `api_key_env`
 /// (default `FINNHUB_API_KEY`) unless `api_key` is set in the file.
@@ -686,6 +701,13 @@ fn feed(t: &Table, env: &dyn Fn(&str) -> Option<String>) -> Result<FeedConfig, S
         provider,
         api_key: api_key.trim().to_owned(),
         names,
+        refresh: Duration::from_secs_f64(number(t, "refresh", 300.0, 10.0, 86_400.0)?),
+        stream: match t.get("stream") {
+            None => true,
+            Some(v) => v
+                .as_bool()
+                .ok_or_else(|| "`stream` must be true or false".to_owned())?,
+        },
     })
 }
 
@@ -783,6 +805,39 @@ mod feed_tests {
         let shown = format!("{feeds:?}");
         assert!(!shown.contains("secret-key"), "{shown}");
         assert!(shown.contains("****"));
+    }
+
+    #[test]
+    fn refresh_and_stream() {
+        let feeds = parse_feeds(
+            "[[feed]]
+provider = \"finnhub\"
+api_key = \"k\"
+refresh = 60
+stream = false",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(feeds[0].refresh, Duration::from_secs(60));
+        assert!(!feeds[0].stream);
+        let defaults = parse_feeds(
+            "[[feed]]
+provider = \"mock\"",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(defaults[0].refresh, Duration::from_secs(300));
+        assert!(defaults[0].stream);
+        assert!(
+            parse_feeds(
+                "[[feed]]
+provider = \"mock\"
+refresh = 1",
+                &[]
+            )
+            .unwrap_err()
+            .contains("between 10")
+        );
     }
 
     #[test]

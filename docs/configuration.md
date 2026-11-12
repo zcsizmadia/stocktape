@@ -58,6 +58,9 @@ provider = "finnhub"             # https://finnhub.io; free accounts work
 # environment variable. You can also write api_key = "..." here, but keep
 # the file private if you do.
 
+refresh = 300                    # seconds between snapshots (min 10; default 300)
+stream = true                    # live trades; false = snapshots only, every `refresh`
+
 [feed.symbols]                   # optional: Finnhub names that differ
 "BTC-USD" = "BINANCE:BTCUSDT"     # (crypto -USD pairs map like this already)
 
@@ -72,6 +75,12 @@ symbols = ["AAPL", "MSFT", "NVDA"]
 
 - Set the key once, e.g. on Windows `setx FINNHUB_API_KEY your-key` (new
   terminals pick it up), or `export FINNHUB_API_KEY=your-key` on Linux/macOS.
+- **How often prices update:** with `stream = true` (default) every trade is
+  pushed as it happens, and snapshots (which also refresh the previous close)
+  come every `refresh` seconds. With `stream = false` prices only update from
+  snapshots, every `refresh` seconds: calmer, and fewer moving numbers.
+  Requests are always spaced about 1.1 s apart, so no setting exceeds the free
+  tier's limit.
 - Prices come from Finnhub snapshots (previous close, for the change) and its
   live trade stream. Free accounts allow 60 requests a minute and 50 streamed
   symbols, and some exchanges are delayed or paid; check Finnhub's terms.
