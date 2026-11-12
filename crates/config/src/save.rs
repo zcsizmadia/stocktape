@@ -7,7 +7,9 @@ use stocktape_layout::{DisplaySelector, Edge, Placement};
 use toml::value::Array;
 use toml::{Table, Value};
 
-use crate::{BannerConfig, Config, FeedConfig, KeySource, LineConfig, Provider, StrategyKind};
+use crate::{
+    BannerConfig, Config, Content, FeedConfig, KeySource, LineConfig, Provider, StrategyKind,
+};
 
 /// The standard location of the configuration file: `stocktape/stocktape.toml`
 /// in the platform's config folder (`%APPDATA%` on Windows,
@@ -130,6 +132,20 @@ fn line_table(t: &mut Table, line: &LineConfig) {
         "strategy".into(),
         Value::String(line.strategy.name().into()),
     );
+    if line.content != Content::Quotes {
+        t.insert("content".into(), Value::String(line.content.name().into()));
+    }
+    if !line.messages.is_empty() {
+        t.insert(
+            "messages".into(),
+            Value::Array(
+                line.messages
+                    .iter()
+                    .map(|m| Value::String(m.clone()))
+                    .collect(),
+            ),
+        );
+    }
 }
 
 fn banner_table(b: &BannerConfig) -> Table {
@@ -271,6 +287,25 @@ impl Config {
                 ),
             );
         }
+        if !self.news.is_empty() {
+            root.insert(
+                "news".into(),
+                Value::Array(
+                    self.news
+                        .iter()
+                        .map(|n| {
+                            let mut t = Table::new();
+                            t.insert("url".into(), Value::String(n.url.clone()));
+                            if let Some(name) = &n.name {
+                                t.insert("name".into(), Value::String(name.clone()));
+                            }
+                            t.insert("refresh".into(), number(n.refresh.as_secs_f64()));
+                            Value::Table(t)
+                        })
+                        .collect(),
+                ),
+            );
+        }
         root.insert(
             "banner".into(),
             Value::Array(
@@ -350,6 +385,18 @@ mod tests {
             speed = 180
             [[banner.line]]
             skin = "daylight"
+            content = "mixed"
+            messages = ["Markets close at 4 PM", "Hello"]
+
+            [[banner]]
+            content = "headlines"
+
+            [[news]]
+            url = "https://example.com/markets.rss"
+            name = "Desk"
+            refresh = 600
+            [[news]]
+            url = "http://example.org/atom.xml"
             "#,
         )
         .unwrap();

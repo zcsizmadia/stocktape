@@ -172,7 +172,9 @@ reverse = true          # flow downward instead of upward
 | `inset` | `[start, end]`: space left free at the ends of the edge | `[0, 0]` |
 | `reverse` | flow the other way | `false` |
 | `dock` | reserve screen space so maximized windows and the taskbar stay clear (edge banners) | `true` |
-| `strategy` | `demo`, `watchlist`, `movers` | `demo` |
+| `strategy` | how quotes are picked: `demo`, `watchlist`, `movers` | `demo` |
+| `content` | `quotes`, `headlines`, `mixed` | `quotes` |
+| `messages` | your own text messages, mixed in now and then | none |
 
 Unknown keys and bad values are errors that name the banner and key.
 
@@ -200,6 +202,38 @@ speed = 90
 Each line is as tall as its skin, and the banner is as tall as its lines
 together (docking reserves the full height). All lines share the banner's
 placement, so they cross monitors and go around corners together.
+
+### Headlines and messages
+
+A line can show quotes, news headlines, or both, plus your own messages:
+
+```toml
+[[news]]                           # RSS or Atom feeds
+url = "https://example.com/markets.rss"
+name = "Markets"                   # optional label; the feed's title otherwise
+refresh = 300                      # seconds between fetches (min 60)
+
+[[banner]]
+place = "bottom"
+
+[[banner.line]]
+content = "mixed"                  # quotes (default), headlines, or mixed
+messages = ["Markets close at 4 PM"]
+
+[[banner.line]]
+skin = "daylight"
+content = "headlines"
+speed = 70
+```
+
+- `mixed` shows a headline after every few quotes; `headlines` shows only
+  headlines, newest first, cycling through them; messages appear now and
+  then on any line.
+- Headlines show the source and the local time they were published, e.g.
+  `MARKETS · 10:42  Stocks rise as inflation cools`. Headlines older than a
+  day are dropped, and the same story from two feeds is shown once.
+- Many publishers offer RSS feeds for personal reading; check each feed's
+  terms. stocktape doesn't scrape web pages.
 
 ### How banners behave
 

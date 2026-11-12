@@ -351,17 +351,49 @@ impl SegmentRenderer {
         let shaped = self.shape(&title.to_uppercase(), &style.symbol, style.flat, scale);
         let x = style.padding * scale;
         let width = x * 2.0 + shaped.width;
-        let blank = QuoteSegment {
-            symbol: String::new(),
-            price: String::new(),
-            change: String::new(),
-            percent: String::new(),
-            direction: Direction::Flat,
-            history: Vec::new(),
-            highlight: false,
-            stale: false,
-        };
-        self.render(vec![Part::Text { x, shaped }], width, &blank, scale)
+        self.render(vec![Part::Text { x, shaped }], width, &blank(), scale)
+    }
+
+    /// Draws a news headline: a muted label (source and, if given, time),
+    /// then the headline in the symbol color and price font.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `scale` is not finite and positive.
+    pub fn draw_headline(&mut self, label: &str, title: &str, scale: f32) -> SegmentImage {
+        assert!(
+            scale.is_finite() && scale > 0.0,
+            "invalid scale factor {scale}"
+        );
+        let style = self.style.clone();
+        // The label borrows the percent style (small, bold), falling back to
+        // the symbol style when the skin hides the percent.
+        let label_style = style
+            .percent
+            .clone()
+            .unwrap_or_else(|| style.symbol.clone());
+        let mut x = style.padding * scale;
+        let mut parts = Vec::new();
+        if !label.is_empty() {
+            let shaped = self.shape(&label.to_uppercase(), &label_style, style.flat, scale);
+            let w = shaped.width;
+            parts.push(Part::Text { x, shaped });
+            x += w + style.spacing * scale;
+        }
+        let shaped = self.shape(title, &style.price, style.symbol.color, scale);
+        let w = shaped.width;
+        parts.push(Part::Text { x, shaped });
+        x += w + style.padding * scale;
+        self.render(parts, x, &blank(), scale)
+    }
+
+    /// Draws a text message of your own, in the symbol style.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `scale` is not finite and positive.
+    pub fn draw_text(&mut self, text: &str, scale: f32) -> SegmentImage {
+        self.draw_headline("", text, scale)
     }
 
     fn render(
@@ -564,6 +596,20 @@ fn draw_sparkline(
             ..Stroke::default()
         };
         pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+}
+
+/// A segment with nothing quote-specific, for headers, headlines and text.
+fn blank() -> QuoteSegment {
+    QuoteSegment {
+        symbol: String::new(),
+        price: String::new(),
+        change: String::new(),
+        percent: String::new(),
+        direction: Direction::Flat,
+        history: Vec::new(),
+        highlight: false,
+        stale: false,
     }
 }
 
@@ -809,6 +855,19 @@ mod tests {
     fn golden_header_and_highlight() {
         let mut r = SegmentRenderer::new(BannerStyle::default());
         check_golden("header_1x", &r.draw_header("Tech", 1.0).pixmap);
+        check_golden(
+            "headline_1x",
+            &r.draw_headline(
+                "Markets Desk · 10:42",
+                "Stocks rise as inflation cools",
+                1.0,
+            )
+            .pixmap,
+        );
+        check_golden(
+            "text_1x",
+            &r.draw_text("Markets close in 15 minutes", 1.0).pixmap,
+        );
         let hot = sample("NVDA", 191.0, 182.07).with_highlight(true);
         check_golden("highlight_up_1x", &r.draw(&hot, 1.0).pixmap);
         let old = sample("AAPL", 238.41, 236.24).with_stale(true);

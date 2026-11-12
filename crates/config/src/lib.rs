@@ -43,8 +43,49 @@ pub struct LineConfig {
     pub skin: String,
     /// Scroll speed in logical pixels per second.
     pub speed: f64,
-    /// What it shows.
+    /// How quotes are chosen.
     pub strategy: StrategyKind,
+    /// Quotes, headlines, or both.
+    pub content: Content,
+    /// Your own text messages, mixed in now and then.
+    pub messages: Vec<String>,
+}
+
+/// What a line shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Content {
+    /// Quotes only.
+    Quotes,
+    /// News headlines only.
+    Headlines,
+    /// Quotes with a headline after every few.
+    Mixed,
+}
+
+impl Content {
+    /// Every kind, for pickers.
+    pub const ALL: [Self; 3] = [Self::Quotes, Self::Headlines, Self::Mixed];
+
+    /// The name used in the configuration file.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Quotes => "quotes",
+            Self::Headlines => "headlines",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
+/// A news (RSS or Atom) feed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewsConfig {
+    /// The feed's URL.
+    pub url: String,
+    /// Label shown before its headlines; the feed's own title if `None`.
+    pub name: Option<String>,
+    /// Time between fetches.
+    pub refresh: Duration,
 }
 
 /// One banner.
@@ -74,6 +115,8 @@ pub struct Config {
     pub feeds: Vec<FeedConfig>,
     /// Watchlist groups; `None` means the demo watchlist.
     pub watchlist: Option<Vec<Group>>,
+    /// News feeds for headline lines.
+    pub news: Vec<NewsConfig>,
 }
 
 mod save;
@@ -205,7 +248,7 @@ impl Config {
             .map_err(|e: toml::de::Error| format!("invalid TOML: {}", e.to_string().trim()))?;
         if let Some(key) = table
             .keys()
-            .find(|k| !["banner", "feed", "watchlist"].contains(&k.as_str()))
+            .find(|k| !["banner", "feed", "watchlist", "news"].contains(&k.as_str()))
         {
             return Err(format!("unknown key `{key}`"));
         }
@@ -229,13 +272,14 @@ impl Config {
             banners,
             feeds: feeds(&table)?,
             watchlist: watchlist(&table)?,
+            news: news(&table)?,
         })
     }
 }
 
 const KEYS: &[&str] = &[
     "name", "place", "displays", "exclude", "dock", "skin", "speed", "offset", "inset", "reverse",
-    "strategy", "line",
+    "strategy", "content", "messages", "line",
 ];
 
 fn number(t: &Table, key: &str, default: f64, min: f64, max: f64) -> Result<f64, String> {
@@ -373,6 +417,8 @@ fn banner(t: &Table) -> Result<BannerConfig, String> {
         skin: string(t, "skin", stocktape_skin::SkinLibrary::DEFAULT)?.to_owned(),
         speed: number(t, "speed", 120.0, 0.0, 5_000.0)?,
         strategy: strategy(t, StrategyKind::Demo)?,
+        content: content(t, Content::Quotes)?,
+        messages: messages(t, &[])?,
     };
     let lines = match t.get("line") {
         None => vec![default],
@@ -416,7 +462,78 @@ fn strategy(t: &Table, default: StrategyKind) -> Result<StrategyKind, String> {
     }
 }
 
-const LINE_KEYS: &[&str] = &["skin", "speed", "strategy"];
+const LINE_KEYS: &[&str] = &["skin", "speed", "strategy", "content", "messages"];
+
+fn content(t: &Table, default: Content) -> Result<Content, String> {
+    let Some(value) = t.get("content") else {
+        return Ok(default);
+    };
+    match value.as_str() {
+        Some("quotes") => Ok(Content::Quotes),
+        Some("headlines") => Ok(Content::Headlines),
+        Some("mixed") => Ok(Content::Mixed),
+        _ => Err(format!(
+            "`content` must be quotes, headlines or mixed, not {value}"
+        )),
+    }
+}
+
+fn messages(t: &Table, default: &[String]) -> Result<Vec<String>, String> {
+    match t.get("messages") {
+        None => Ok(default.to_vec()),
+        Some(Value::Array(list)) => list
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "`messages` must be a list of strings".to_owned())
+            })
+            .collect(),
+        Some(_) => Err("`messages` must be a list of strings".to_owned()),
+    }
+}
+
+const NEWS_KEYS: &[&str] = &["url", "name", "refresh"];
+
+/// `[[news]]` feeds.
+fn news(table: &Table) -> Result<Vec<NewsConfig>, String> {
+    let Some(value) = table.get("news") else {
+        return Ok(Vec::new());
+    };
+    let Value::Array(list) = value else {
+        return Err("`news` must be one or more [[news]] tables".to_owned());
+    };
+    list.iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let err = |e: String| format!("news {}: {e}", i + 1);
+            let t = v
+                .as_table()
+                .ok_or_else(|| err("must be a table".to_owned()))?;
+            if let Some(key) = t.keys().find(|k| !NEWS_KEYS.contains(&k.as_str())) {
+                return Err(err(format!("unknown key `{key}`")));
+            }
+            let url = string(t, "url", "").map_err(err)?.trim().to_owned();
+            if !(url.starts_with("https://") || url.starts_with("http://")) {
+                return Err(err("needs `url = \"https://...\"`".to_owned()));
+            }
+            let name = match t.get("name") {
+                None => None,
+                Some(v) => Some(
+                    v.as_str()
+                        .ok_or_else(|| err("`name` must be a string".to_owned()))?
+                        .to_owned(),
+                ),
+            };
+            let refresh = number(t, "refresh", 300.0, 60.0, 86_400.0).map_err(err)?;
+            Ok(NewsConfig {
+                url,
+                name,
+                refresh: Duration::from_secs_f64(refresh),
+            })
+        })
+        .collect()
+}
 
 fn parse_line(t: &Table, default: &LineConfig) -> Result<LineConfig, String> {
     if let Some(key) = t.keys().find(|k| !LINE_KEYS.contains(&k.as_str())) {
@@ -426,6 +543,8 @@ fn parse_line(t: &Table, default: &LineConfig) -> Result<LineConfig, String> {
         skin: string(t, "skin", &default.skin)?.to_owned(),
         speed: number(t, "speed", default.speed, 0.0, 5_000.0)?,
         strategy: strategy(t, default.strategy)?,
+        content: content(t, default.content)?,
+        messages: messages(t, &default.messages)?,
     })
 }
 
@@ -462,7 +581,9 @@ mod tests {
             [LineConfig {
                 skin: "classic-dark".into(),
                 speed: 120.0,
-                strategy: StrategyKind::Demo
+                strategy: StrategyKind::Demo,
+                content: Content::Quotes,
+                messages: Vec::new(),
             }]
         );
     }
@@ -551,7 +672,9 @@ dock = 1"
             LineConfig {
                 skin: "terminal".into(),
                 speed: 240.0,
-                strategy: StrategyKind::Movers
+                strategy: StrategyKind::Movers,
+                content: Content::Quotes,
+                messages: Vec::new(),
             }
         );
         assert_eq!(
@@ -559,7 +682,9 @@ dock = 1"
             LineConfig {
                 skin: "daylight".into(),
                 speed: 80.0,
-                strategy: StrategyKind::Demo
+                strategy: StrategyKind::Demo,
+                content: Content::Quotes,
+                messages: Vec::new(),
             }
         );
         let err = Config::parse("[[banner]]\n[[banner.line]]\nsped = 3").unwrap_err();
@@ -907,6 +1032,7 @@ mod feed_tests {
             banners: Vec::new(),
             feeds: missing,
             watchlist: None,
+            news: Vec::new(),
         };
         let err = config.check_keys().unwrap_err();
         assert!(
@@ -1036,5 +1162,33 @@ refresh = 1",
         assert!(err.contains("watchlist group 1"), "{err}");
         assert!(Config::parse("[[banner]]\n[[watchlist]]\ntitle = \"x\"").is_err());
         assert!(Config::parse("[[banner]]").unwrap().watchlist.is_none());
+    }
+}
+
+#[cfg(test)]
+mod news_tests {
+    use super::*;
+
+    #[test]
+    fn content_messages_and_news() {
+        let c = Config::parse(
+            "[[banner]]\ncontent = \"mixed\"\nmessages = [\"Hi\"]\n[[news]]\nurl = \"https://x.example/rss\"",
+        )
+        .unwrap();
+        assert_eq!(c.banners[0].lines[0].content, Content::Mixed);
+        assert_eq!(c.banners[0].lines[0].messages, ["Hi"]);
+        assert_eq!(c.news[0].refresh, Duration::from_secs(300));
+        assert_eq!(c.news[0].name, None);
+        let err = |t: &str| Config::parse(t).unwrap_err();
+        assert!(err("[[banner]]\ncontent = \"video\"").contains("`content` must be"));
+        assert!(err("[[banner]]\nmessages = \"x\"").contains("list of strings"));
+        assert!(err("[[banner]]\n[[news]]\nurl = \"ftp://x\"").contains("news 1: needs `url"));
+        assert!(
+            err("[[banner]]\n[[news]]\nurl = \"https://x\"\nrefresh = 5").contains("between 60")
+        );
+        assert!(
+            err("[[banner]]\n[[news]]\nurl = \"https://x\"\nfeed = 1")
+                .contains("unknown key `feed`")
+        );
     }
 }

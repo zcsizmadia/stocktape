@@ -140,6 +140,7 @@ mod tests {
             store: &store,
             now: Duration::ZERO,
             wall,
+            headlines: &[],
         };
         s.next(&ctx)
             .and_then(|i| i.symbol().map(ToString::to_string))

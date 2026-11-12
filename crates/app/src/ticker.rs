@@ -8,19 +8,20 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
-use stocktape_core::{Clock, QuoteStore, Symbol};
+use stocktape_core::{Clock, Headline, QuoteStore, Symbol, Timestamp};
 use stocktape_layout::{Belt, BeltConfig, BeltItem, Flow, Segment, Snap};
 use stocktape_render::frame::compose;
 use stocktape_render::{BannerStyle, QuoteSegment, SegmentImage, SegmentRenderer};
 use stocktape_sources::failover::Arbiter;
 use stocktape_sources::mock::MockFeed;
-use stocktape_sources::{FeedEvent, FeedHandle, Update, finnhub, massive};
+use stocktape_sources::{FeedEvent, FeedHandle, Update, finnhub, massive, news};
 use stocktape_strategies::{
-    Caps, Context, Group, HighlightRules, Highlights, Item, Mix, Movers, Strategy, Watchlist,
+    Caps, Context, Group, Headlines, HighlightRules, Highlights, Item, Messages, Mix, Movers,
+    Strategy, Watchlist,
 };
 use tiny_skia::Pixmap;
 
-use stocktape_config::{FeedConfig, Provider, StrategyKind};
+use stocktape_config::{Content, FeedConfig, NewsConfig, Provider, StrategyKind};
 
 /// How often the mock feed produces new prices.
 const FEED_INTERVAL: Duration = Duration::from_secs(1);
@@ -51,6 +52,48 @@ pub struct Market {
     source: Source,
     store: QuoteStore,
     stale_after: Option<Duration>,
+    news: Option<News>,
+    headlines: Vec<Headline>,
+}
+
+/// Running news feeds.
+struct News {
+    events: Receiver<FeedEvent>,
+    // Held so the feed threads keep running; dropping them stops them.
+    _feeds: Vec<FeedHandle>,
+    by_source: HashMap<String, Vec<Headline>>,
+    last_status: HashMap<usize, String>,
+}
+
+/// Headlines older than this are dropped.
+const HEADLINE_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
+/// Most headlines kept across all sources.
+const HEADLINE_MAX: usize = 100;
+
+/// Merges every source's headlines: newest first (undated ones after dated
+/// ones), duplicates removed, old ones dropped, at most `HEADLINE_MAX`.
+fn merge_headlines(by_source: &HashMap<String, Vec<Headline>>, now: Timestamp) -> Vec<Headline> {
+    let cutoff = now
+        .checked_sub(jiff::SignedDuration::try_from(HEADLINE_MAX_AGE).unwrap_or_default())
+        .ok();
+    let mut all: Vec<Headline> = by_source
+        .values()
+        .flatten()
+        .filter(|h| match (h.published, cutoff) {
+            (Some(p), Some(c)) => p >= c,
+            _ => true,
+        })
+        .cloned()
+        .collect();
+    all.sort_by(|a, b| {
+        b.published
+            .cmp(&a.published)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    let mut seen = HashSet::new();
+    all.retain(|h| seen.insert(h.title.to_lowercase()));
+    all.truncate(HEADLINE_MAX);
+    all
 }
 
 impl Market {
@@ -63,7 +106,48 @@ impl Market {
             },
             store: QuoteStore::new(HISTORY),
             stale_after: None,
+            news: None,
+            headlines: Vec::new(),
         }
+    }
+
+    /// Starts news feeds for headline lines.
+    #[must_use]
+    pub fn with_news(mut self, sources: &[NewsConfig]) -> Self {
+        if sources.is_empty() {
+            return self;
+        }
+        let (tx, events) = channel();
+        let feeds = sources
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                news::spawn(
+                    news::NewsConfig {
+                        url: n.url.clone(),
+                        name: n.name.clone(),
+                        refresh: n.refresh,
+                    },
+                    i,
+                    tx.clone(),
+                )
+            })
+            .collect();
+        self.news = Some(News {
+            events,
+            _feeds: feeds,
+            by_source: HashMap::new(),
+            last_status: HashMap::new(),
+        });
+        self
+    }
+
+    /// Adds headlines from `source` directly (for tests and demos).
+    #[cfg(test)]
+    pub fn set_headlines(&mut self, source: &str, items: Vec<Headline>, now: Timestamp) {
+        let mut by_source = HashMap::new();
+        by_source.insert(source.to_owned(), items);
+        self.headlines = merge_headlines(&by_source, now);
     }
 
     /// Starts the configured feeds (primary first) for the watchlist's
@@ -140,6 +224,8 @@ impl Market {
             },
             store: QuoteStore::new(HISTORY),
             stale_after: Some(STALE_AFTER),
+            news: None,
+            headlines: Vec::new(),
         }
     }
 
@@ -155,6 +241,27 @@ impl Market {
     /// feeds sent since the last call.
     pub fn poll(&mut self, clock: &dyn Clock) {
         let now = clock.monotonic();
+        if let Some(news) = &mut self.news {
+            let mut changed = false;
+            while let Ok(event) = news.events.try_recv() {
+                match event.update {
+                    Update::Headlines { source, items } => {
+                        news.by_source.insert(source, items);
+                        changed = true;
+                    }
+                    Update::Status { message, .. } => {
+                        if news.last_status.get(&event.feed) != Some(&message) {
+                            eprintln!("{message}");
+                            news.last_status.insert(event.feed, message);
+                        }
+                    }
+                    Update::Quote(_) => {}
+                }
+            }
+            if changed {
+                self.headlines = merge_headlines(&news.by_source, clock.wall());
+            }
+        }
         match &mut self.source {
             Source::Mock { feed, last } => {
                 if last.is_none_or(|l| now.saturating_sub(l) >= FEED_INTERVAL) {
@@ -177,6 +284,7 @@ impl Market {
                                 self.store.apply(quote, now);
                             }
                         }
+                        Update::Headlines { .. } => {}
                         Update::Status { message, .. } => {
                             // Print each change once, not every retry tick.
                             if last_status.get(&event.feed) != Some(&message) {
@@ -207,8 +315,37 @@ pub fn demo_groups() -> Vec<Group> {
     ]
 }
 
-/// Builds a line's strategy over the watchlist `groups`.
-fn strategy(kind: StrategyKind, seed: u64, groups: &[Group]) -> Box<dyn Strategy> {
+/// Builds a line's strategy: quotes chosen by `kind` over `groups`,
+/// headlines, or both, with the line's own messages mixed in now and then.
+fn strategy(
+    kind: StrategyKind,
+    content: Content,
+    messages: &[String],
+    seed: u64,
+    groups: &[Group],
+) -> Box<dyn Strategy> {
+    let main: Box<dyn Strategy> = match content {
+        Content::Quotes => quote_strategy(kind, seed, groups),
+        Content::Headlines => Box::new(Headlines::new()),
+        Content::Mixed => Box::new(
+            Mix::new()
+                .with(quote_strategy(kind, seed, groups), 4)
+                .with(Headlines::new(), 1),
+        ),
+    };
+    if messages.is_empty() {
+        main
+    } else {
+        Box::new(
+            Mix::new()
+                .with(main, 6)
+                .with(Messages::new(messages.to_vec()), 1),
+        )
+    }
+}
+
+/// Builds the quote strategy for `kind` over the watchlist `groups`.
+fn quote_strategy(kind: StrategyKind, seed: u64, groups: &[Group]) -> Box<dyn Strategy> {
     let watchlist = || Watchlist::grouped(groups.to_vec());
     let symbols = || {
         groups
@@ -239,13 +376,15 @@ fn strategy(kind: StrategyKind, seed: u64, groups: &[Group]) -> Box<dyn Strategy
 }
 
 /// What a belt item shows; kept so it can be drawn at any scale.
-enum Content {
+enum Piece {
     Quote(QuoteSegment),
     Header(String),
+    Headline { label: String, title: String },
+    Text(String),
 }
 
 struct Entry {
-    content: Content,
+    content: Piece,
     width: f64,
     /// Drawn images by scale factor (as `f32` bits).
     images: HashMap<u32, SegmentImage>,
@@ -261,6 +400,8 @@ pub struct LineRuntime {
     /// Scale used to measure item widths (the largest of the banner's
     /// displays, so text is sized for the sharpest one).
     measure_scale: f32,
+    /// For showing headline times in local time.
+    local_tz: jiff::tz::TimeZone,
 }
 
 impl std::fmt::Debug for LineRuntime {
@@ -273,24 +414,18 @@ impl std::fmt::Debug for LineRuntime {
 
 impl LineRuntime {
     /// Creates a line.
-    pub fn new(
-        kind: StrategyKind,
-        seed: u64,
-        speed: f64,
-        style: BannerStyle,
-        groups: &[Group],
-        clock: &dyn Clock,
-    ) -> Self {
+    pub fn new(spec: &LineSpec, seed: u64, groups: &[Group], clock: &dyn Clock) -> Self {
         let config = BeltConfig {
-            speed,
+            speed: spec.speed,
             gap: 0.0,
             lookahead: 400.0,
             snap: Snap::None,
         };
         Self {
-            strategy: strategy(kind, seed, groups),
+            strategy: strategy(spec.strategy, spec.content, &spec.messages, seed, groups),
             belt: Belt::new(config, clock.monotonic()),
-            renderer: SegmentRenderer::new(style),
+            renderer: SegmentRenderer::new(spec.style.clone()),
+            local_tz: jiff::tz::TimeZone::system(),
             entries: HashMap::new(),
             next_id: 0,
             measure_scale: 1.0,
@@ -330,17 +465,28 @@ impl LineRuntime {
             entries,
             next_id,
             measure_scale,
+            local_tz,
         } = self;
         let scale = *measure_scale;
         let wall = clock.wall();
         let store = &market.store;
         let mut source = |now| {
-            let ctx = Context { store, now, wall };
+            let ctx = Context {
+                store,
+                now,
+                wall,
+                headlines: &market.headlines,
+            };
             let content = match strategy.next(&ctx)? {
-                Item::Header(title) => Content::Header(title),
+                Item::Header(title) => Piece::Header(title),
+                Item::Headline(h) => Piece::Headline {
+                    label: headline_label(&h, local_tz),
+                    title: h.title,
+                },
+                Item::Text(text) => Piece::Text(text),
                 Item::Quote { symbol, highlight } => {
                     let entry = store.get(&symbol)?;
-                    Content::Quote(
+                    Piece::Quote(
                         QuoteSegment::from_quote(entry.quote())
                             .with_history(entry.history().map(|(_, price)| price))
                             .with_highlight(highlight.is_some())
@@ -413,8 +559,12 @@ impl LineRuntime {
 /// One line's settings, for building a [`BannerRuntime`].
 #[derive(Debug, Clone)]
 pub struct LineSpec {
-    /// What the line shows.
+    /// How quotes are chosen.
     pub strategy: StrategyKind,
+    /// Quotes, headlines, or both.
+    pub content: Content,
+    /// Text messages mixed in now and then.
+    pub messages: Vec<String>,
     /// Scroll speed in logical pixels per second.
     pub speed: f64,
     /// The line's look; its height is the line's thickness.
@@ -450,16 +600,7 @@ impl BannerRuntime {
         let lines: Vec<LineRuntime> = lines
             .iter()
             .enumerate()
-            .map(|(i, l)| {
-                LineRuntime::new(
-                    l.strategy,
-                    seed.wrapping_add(i as u64 * 7919),
-                    l.speed,
-                    l.style.clone(),
-                    groups,
-                    clock,
-                )
-            })
+            .map(|(i, l)| LineRuntime::new(l, seed.wrapping_add(i as u64 * 7919), groups, clock))
             .collect();
         let line_strips = lines.iter().map(|_| None).collect();
         Self { lines, line_strips }
@@ -476,6 +617,8 @@ impl BannerRuntime {
         Self::new(
             &[LineSpec {
                 strategy: kind,
+                content: Content::Quotes,
+                messages: Vec::new(),
                 speed,
                 style,
             }],
@@ -575,10 +718,23 @@ impl BannerRuntime {
     }
 }
 
-fn draw(renderer: &mut SegmentRenderer, content: &Content, scale: f32) -> SegmentImage {
+/// `SOURCE · 10:42` (local time) for a headline, or just the source.
+fn headline_label(h: &Headline, tz: &jiff::tz::TimeZone) -> String {
+    match h.published {
+        Some(t) => {
+            let local = t.to_zoned(tz.clone());
+            format!("{} · {:02}:{:02}", h.source, local.hour(), local.minute())
+        }
+        None => h.source.clone(),
+    }
+}
+
+fn draw(renderer: &mut SegmentRenderer, content: &Piece, scale: f32) -> SegmentImage {
     match content {
-        Content::Quote(segment) => renderer.draw(segment, scale),
-        Content::Header(title) => renderer.draw_header(title, scale),
+        Piece::Quote(segment) => renderer.draw(segment, scale),
+        Piece::Header(title) => renderer.draw_header(title, scale),
+        Piece::Headline { label, title } => renderer.draw_headline(label, title, scale),
+        Piece::Text(text) => renderer.draw_text(text, scale),
     }
 }
 
@@ -778,11 +934,15 @@ mod tests {
             &[
                 LineSpec {
                     strategy: StrategyKind::Movers,
+                    content: Content::Quotes,
+                    messages: Vec::new(),
                     speed: 300.0,
                     style: style("classic-dark"),
                 },
                 LineSpec {
                     strategy: StrategyKind::Watchlist,
+                    content: Content::Quotes,
+                    messages: Vec::new(),
                     speed: 100.0,
                     style: style("daylight"),
                 },
@@ -879,6 +1039,90 @@ mod tests {
             "{}",
             b.lines[0].entries.len()
         );
+    }
+
+    fn headline(title: &str, published: Option<i64>) -> Headline {
+        Headline {
+            source: "Desk".into(),
+            title: title.into(),
+            published: published.map(|s| Timestamp::from_second(s).unwrap()),
+            link: None,
+        }
+    }
+
+    #[test]
+    fn headlines_merge_newest_first_without_duplicates_or_old_news() {
+        let now = Timestamp::from_second(PREVIEW_EPOCH).unwrap();
+        let mut by_source = HashMap::new();
+        by_source.insert(
+            "A".to_owned(),
+            vec![
+                headline("Older", Some(PREVIEW_EPOCH - 3600)),
+                headline("Newest", Some(PREVIEW_EPOCH - 60)),
+                headline("Ancient", Some(PREVIEW_EPOCH - 3 * 24 * 3600)),
+                headline("Undated", None),
+            ],
+        );
+        by_source.insert(
+            "B".to_owned(),
+            vec![headline("newest", Some(PREVIEW_EPOCH - 30))],
+        );
+        let merged = merge_headlines(&by_source, now);
+        let titles: Vec<&str> = merged.iter().map(|h| h.title.as_str()).collect();
+        // "newest" (B) is the same story as "Newest" (A): kept once, the newer.
+        assert_eq!(titles, ["newest", "Older", "Undated"]);
+    }
+
+    #[test]
+    fn a_headlines_line_shows_headlines() {
+        let clock = clock();
+        let mut market = Market::demo(4);
+        market.set_headlines(
+            "Desk",
+            vec![
+                headline("Stocks rise", Some(PREVIEW_EPOCH - 60)),
+                headline("Oil slips", None),
+            ],
+            clock.wall(),
+        );
+        let style = BannerStyle::default();
+        let mut b = BannerRuntime::new(
+            &[LineSpec {
+                strategy: StrategyKind::Demo,
+                content: Content::Headlines,
+                messages: vec!["Hello".to_owned()],
+                speed: 600.0,
+                style,
+            }],
+            &demo_groups(),
+            1,
+            &clock,
+        );
+        run(&mut market, &mut b, &clock, 2000.0, 120);
+        let kinds: Vec<&str> = b.lines[0]
+            .entries
+            .values()
+            .map(|e| match &e.content {
+                Piece::Headline { .. } => "headline",
+                Piece::Text(_) => "text",
+                Piece::Quote(_) => "quote",
+                Piece::Header(_) => "header",
+            })
+            .collect();
+        assert!(kinds.contains(&"headline"), "{kinds:?}");
+        assert!(kinds.contains(&"text"), "{kinds:?}");
+        assert!(!kinds.contains(&"quote"), "{kinds:?}");
+    }
+
+    #[test]
+    fn headline_labels_show_source_and_local_time() {
+        let tz = jiff::tz::TimeZone::fixed(jiff::tz::offset(-5));
+        // 15:30 UTC is 10:30 at UTC-5.
+        assert_eq!(
+            headline_label(&headline("x", Some(PREVIEW_EPOCH)), &tz),
+            "Desk · 10:30"
+        );
+        assert_eq!(headline_label(&headline("x", None), &tz), "Desk");
     }
 
     #[test]

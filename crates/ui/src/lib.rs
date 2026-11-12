@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use eframe::egui;
 use stocktape_config::{
-    BannerConfig, Config, FeedConfig, KeySource, LineConfig, Provider, StrategyKind, presets,
-    selector_from_text, selector_to_text,
+    BannerConfig, Config, Content, FeedConfig, KeySource, LineConfig, NewsConfig, Provider,
+    StrategyKind, presets, selector_from_text, selector_to_text,
 };
 use stocktape_core::Symbol;
 use stocktape_layout::{DisplaySelector, Edge, Placement, PlacementOptions};
@@ -418,6 +418,57 @@ impl SettingsApp {
                 stream: true,
             });
         }
+        ui.add_space(16.0);
+        ui.heading("News");
+        ui.label("RSS or Atom feeds for lines that show headlines. Check each feed's terms.");
+        let mut remove_news = None;
+        for (i, n) in self.config.news.iter_mut().enumerate() {
+            ui.push_id(("news", i), |ui| {
+                ui.horizontal(|ui| {
+                    let label = ui.label("URL");
+                    ui.add(egui::TextEdit::singleline(&mut n.url).desired_width(360.0))
+                        .labelled_by(label.id);
+                    let label = ui.label("Label");
+                    let mut name = n.name.clone().unwrap_or_default();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut name)
+                                .hint_text("feed title")
+                                .desired_width(120.0),
+                        )
+                        .labelled_by(label.id)
+                        .changed()
+                    {
+                        n.name = (!name.trim().is_empty()).then(|| name.trim().to_owned());
+                    }
+                    let mut secs = n.refresh.as_secs_f64();
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut secs)
+                                .range(60.0..=86_400.0)
+                                .prefix("every ")
+                                .suffix(" s"),
+                        )
+                        .changed()
+                    {
+                        n.refresh = Duration::from_secs_f64(secs);
+                    }
+                    if ui.button("Remove news feed").clicked() {
+                        remove_news = Some(i);
+                    }
+                });
+            });
+        }
+        if let Some(i) = remove_news {
+            self.config.news.remove(i);
+        }
+        if ui.button("Add news feed").clicked() {
+            self.config.news.push(NewsConfig {
+                url: "https://".to_owned(),
+                name: None,
+                refresh: Duration::from_secs(300),
+            });
+        }
     }
 
     fn watchlist(&mut self, ui: &mut egui::Ui) {
@@ -553,6 +604,8 @@ fn default_line() -> LineConfig {
         skin: SkinLibrary::DEFAULT.to_owned(),
         speed: 120.0,
         strategy: StrategyKind::Demo,
+        content: Content::Quotes,
+        messages: Vec::new(),
     }
 }
 
@@ -649,6 +702,16 @@ fn banner_editor(
                         .suffix(" px/s"),
                 );
                 let label = ui.label("Shows");
+                egui::ComboBox::from_id_salt("content")
+                    .selected_text(line.content.name())
+                    .show_ui(ui, |ui| {
+                        for c in Content::ALL {
+                            ui.selectable_value(&mut line.content, c, c.name());
+                        }
+                    })
+                    .response
+                    .labelled_by(label.id);
+                let label = ui.label("Quotes by");
                 egui::ComboBox::from_id_salt("strategy")
                     .selected_text(line.strategy.name())
                     .show_ui(ui, |ui| {
@@ -672,6 +735,26 @@ fn banner_editor(
                     .clicked()
                 {
                     remove_line = Some(l);
+                }
+            });
+            ui.horizontal(|ui| {
+                let label = ui.label("Messages");
+                // Separated by "|"; kept exactly as typed so editing is smooth.
+                let mut text = line.messages.join("|");
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut text)
+                            .hint_text("e.g. Markets close at 4 PM | Welcome")
+                            .desired_width(420.0),
+                    )
+                    .labelled_by(label.id)
+                    .changed()
+                {
+                    line.messages = if text.trim().is_empty() {
+                        Vec::new()
+                    } else {
+                        text.split('|').map(str::to_owned).collect()
+                    };
                 }
             });
         });

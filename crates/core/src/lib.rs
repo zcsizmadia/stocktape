@@ -9,11 +9,13 @@
 
 mod clock;
 pub mod format;
+pub mod headline;
 mod quote;
 mod store;
 mod symbol;
 
 pub use clock::{Clock, ManualClock, SystemClock};
+pub use headline::Headline;
 pub use quote::{Currency, CurrencyError, Direction, Quote};
 pub use store::{QuoteStore, StoreEntry};
 pub use symbol::{ExchangeCode, Symbol, SymbolError};
