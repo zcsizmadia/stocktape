@@ -27,7 +27,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::config::{BannerConfig, Config};
-use crate::ticker::{BannerRuntime, LineSpec, Market};
+use crate::ticker::{BannerRuntime, LineSpec, Market, demo_groups};
 
 /// Frame interval when no display reports its refresh rate.
 const DEFAULT_FRAME: Duration = Duration::from_micros(16_667);
@@ -387,6 +387,8 @@ pub fn run(
 ) -> Result<(), Box<dyn Error>> {
     let clock = SystemClock::new();
     let seed = seed();
+    let groups = config.watchlist.clone().unwrap_or_else(demo_groups);
+    let config_feeds = config.feeds.clone();
     // Fail before opening any window if a skin is broken.
     let banners = config
         .banners
@@ -403,7 +405,7 @@ pub fn run(
                     style,
                 })
                 .collect();
-            let runtime = BannerRuntime::new(&specs, seed + i as u64, &clock);
+            let runtime = BannerRuntime::new(&specs, &groups, seed + i as u64, &clock);
             Ok(Banner {
                 config,
                 runtime,
@@ -415,7 +417,7 @@ pub fn run(
     let event_loop = EventLoop::new()?;
     let mut app = App {
         clock,
-        market: Market::demo(seed),
+        market: Market::from_config(&config_feeds, &groups, seed),
         banners,
 
         watch,

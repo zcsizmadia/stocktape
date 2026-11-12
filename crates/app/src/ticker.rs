@@ -5,53 +5,165 @@
 //! with a [`ManualClock`](stocktape_core::ManualClock).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 use stocktape_core::{Clock, QuoteStore, Symbol};
 use stocktape_layout::{Belt, BeltConfig, BeltItem, Flow, Segment, Snap};
 use stocktape_render::frame::compose;
 use stocktape_render::{BannerStyle, QuoteSegment, SegmentImage, SegmentRenderer};
+use stocktape_sources::failover::Arbiter;
 use stocktape_sources::mock::MockFeed;
+use stocktape_sources::{FeedEvent, FeedHandle, Update, finnhub};
 use stocktape_strategies::{
     Caps, Context, Group, HighlightRules, Highlights, Item, Mix, Movers, Strategy, Watchlist,
 };
 use tiny_skia::Pixmap;
 
-use crate::config::StrategyKind;
+use crate::config::{FeedConfig, Provider, StrategyKind};
 
 /// How often the mock feed produces new prices.
 const FEED_INTERVAL: Duration = Duration::from_secs(1);
 /// Price points kept per symbol.
 const HISTORY: usize = 120;
+/// A backup feed takes over a symbol after the primary is quiet this long.
+const FAILOVER_AFTER: Duration = Duration::from_secs(30);
+/// Live quotes older than this are drawn faded. Snapshots refresh every
+/// 5 minutes even without trades, so this only trips when a feed is down.
+const STALE_AFTER: Duration = Duration::from_secs(15 * 60);
 
-/// The feed and the latest quotes, shared by every banner.
+enum Source {
+    Mock {
+        feed: MockFeed,
+        last: Option<Duration>,
+    },
+    Live {
+        events: Receiver<FeedEvent>,
+        arbiter: Arbiter,
+        // Held so the feed threads keep running; dropping them stops them.
+        _feeds: Vec<FeedHandle>,
+        last_status: HashMap<usize, String>,
+    },
+}
+
+/// The feeds and the latest quotes, shared by every banner.
 pub struct Market {
-    feed: MockFeed,
+    source: Source,
     store: QuoteStore,
-    last_feed: Option<Duration>,
+    stale_after: Option<Duration>,
 }
 
 impl Market {
     /// The demo market: sample prices from the mock feed.
     pub fn demo(seed: u64) -> Self {
         Self {
-            feed: MockFeed::demo(seed),
+            source: Source::Mock {
+                feed: MockFeed::demo(seed),
+                last: None,
+            },
             store: QuoteStore::new(HISTORY),
-            last_feed: None,
+            stale_after: None,
         }
     }
 
-    /// Pulls new prices from the feed when they are due.
+    /// Starts the configured feeds (primary first) for the watchlist's
+    /// symbols; with no live feeds, the demo market.
+    pub fn from_config(feeds: &[FeedConfig], groups: &[Group], seed: u64) -> Self {
+        let live: Vec<&FeedConfig> = feeds
+            .iter()
+            .filter(|f| f.provider != Provider::Mock)
+            .collect();
+        if live.is_empty() {
+            return Self::demo(seed);
+        }
+        let mut symbols: Vec<Symbol> = Vec::new();
+        for s in groups.iter().flat_map(|g| &g.symbols) {
+            if !symbols.contains(s) {
+                symbols.push(s.clone());
+            }
+        }
+        let (tx, events) = channel();
+        let handles = live
+            .iter()
+            .enumerate()
+            .map(|(index, feed)| match feed.provider {
+                Provider::Finnhub => {
+                    let names = symbols
+                        .iter()
+                        .map(|s| {
+                            let name = feed
+                                .names
+                                .iter()
+                                .find(|(sym, _)| sym == s)
+                                .map_or_else(|| finnhub::default_name(s), |(_, n)| n.clone());
+                            (s.clone(), name)
+                        })
+                        .collect();
+                    finnhub::spawn(
+                        finnhub::FinnhubConfig::new(feed.api_key.clone(), names),
+                        index,
+                        tx.clone(),
+                    )
+                }
+                Provider::Mock => unreachable!("mock feeds are filtered out"),
+            })
+            .collect();
+        Self {
+            source: Source::Live {
+                events,
+                arbiter: Arbiter::new(FAILOVER_AFTER),
+                _feeds: handles,
+                last_status: HashMap::new(),
+            },
+            store: QuoteStore::new(HISTORY),
+            stale_after: Some(STALE_AFTER),
+        }
+    }
+
+    /// Whether `symbol`'s latest quote is too old to trust.
+    pub fn is_stale(&self, symbol: &Symbol, now: Duration) -> bool {
+        match (self.stale_after, self.store.get(symbol)) {
+            (Some(after), Some(entry)) => entry.is_stale(now, after),
+            _ => false,
+        }
+    }
+
+    /// Takes in new prices: from the mock feed when due, or whatever the live
+    /// feeds sent since the last call.
     pub fn poll(&mut self, clock: &dyn Clock) {
         let now = clock.monotonic();
-        let due = self
-            .last_feed
-            .is_none_or(|last| now.saturating_sub(last) >= FEED_INTERVAL);
-        if due {
-            for quote in self.feed.tick(clock.wall()) {
-                self.store.apply(quote, now);
+        match &mut self.source {
+            Source::Mock { feed, last } => {
+                if last.is_none_or(|l| now.saturating_sub(l) >= FEED_INTERVAL) {
+                    for quote in feed.tick(clock.wall()) {
+                        self.store.apply(quote, now);
+                    }
+                    *last = Some(now);
+                }
             }
-            self.last_feed = Some(now);
+            Source::Live {
+                events,
+                arbiter,
+                last_status,
+                ..
+            } => {
+                while let Ok(event) = events.try_recv() {
+                    match event.update {
+                        Update::Quote(quote) => {
+                            if arbiter.accept(event.feed, &quote.symbol, now) {
+                                self.store.apply(quote, now);
+                            }
+                        }
+                        Update::Status { message, .. } => {
+                            // Print each change once, not every retry tick.
+                            if last_status.get(&event.feed) != Some(&message) {
+                                eprintln!("{message}");
+                                last_status.insert(event.feed, message);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -60,36 +172,44 @@ fn sym(s: &str) -> Symbol {
     s.parse().expect("demo symbols are valid")
 }
 
-fn demo_watchlist() -> Watchlist {
-    Watchlist::grouped(vec![
+/// The demo watchlist, used when the configuration has none.
+pub fn demo_groups() -> Vec<Group> {
+    vec![
         Group::titled(
             "Tech",
             ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "TSLA"].map(sym),
         ),
         Group::titled("Banks & Energy", ["JPM", "XOM"].map(sym)),
         Group::titled("Crypto", ["BTC-USD"].map(sym)),
-    ])
+    ]
 }
 
-/// Builds a banner's strategy.
-fn strategy(kind: StrategyKind, seed: u64) -> Box<dyn Strategy> {
+/// Builds a line's strategy over the watchlist `groups`.
+fn strategy(kind: StrategyKind, seed: u64, groups: &[Group]) -> Box<dyn Strategy> {
+    let watchlist = || Watchlist::grouped(groups.to_vec());
+    let symbols = || {
+        groups
+            .iter()
+            .flat_map(|g| g.symbols.clone())
+            .collect::<Vec<_>>()
+    };
     match kind {
-        // Sector groups with a mover after every three items, repeats kept
-        // 20 s apart, notable moves highlighted.
+        // Groups with a mover after every three items, repeats kept 20 s
+        // apart, notable moves highlighted.
         StrategyKind::Demo => {
             let mix = Mix::new()
-                .with(demo_watchlist(), 3)
-                .with(Movers::new(seed).min_move(0.5), 1);
+                .with(watchlist(), 3)
+                .with(Movers::new(seed).among(symbols()).min_move(0.5), 1);
             Box::new(Highlights::new(
                 Caps::new(mix, Duration::from_secs(20)),
                 HighlightRules::default(),
             ))
         }
         StrategyKind::Watchlist => {
-            Box::new(Highlights::new(demo_watchlist(), HighlightRules::default()))
+            Box::new(Highlights::new(watchlist(), HighlightRules::default()))
         }
         StrategyKind::Movers => Box::new(Highlights::new(
-            Caps::new(Movers::new(seed), Duration::from_secs(8)),
+            Caps::new(Movers::new(seed).among(symbols()), Duration::from_secs(8)),
             HighlightRules::default(),
         )),
     }
@@ -135,6 +255,7 @@ impl LineRuntime {
         seed: u64,
         speed: f64,
         style: BannerStyle,
+        groups: &[Group],
         clock: &dyn Clock,
     ) -> Self {
         let config = BeltConfig {
@@ -144,7 +265,7 @@ impl LineRuntime {
             snap: Snap::None,
         };
         Self {
-            strategy: strategy(kind, seed),
+            strategy: strategy(kind, seed, groups),
             belt: Belt::new(config, clock.monotonic()),
             renderer: SegmentRenderer::new(style),
             entries: HashMap::new(),
@@ -199,7 +320,8 @@ impl LineRuntime {
                     Content::Quote(
                         QuoteSegment::from_quote(entry.quote())
                             .with_history(entry.history().map(|(_, price)| price))
-                            .with_highlight(highlight.is_some()),
+                            .with_highlight(highlight.is_some())
+                            .with_stale(market.is_stale(&symbol, now)),
                     )
                 }
             };
@@ -300,7 +422,7 @@ impl BannerRuntime {
     /// # Panics
     ///
     /// Panics if `lines` is empty.
-    pub fn new(lines: &[LineSpec], seed: u64, clock: &dyn Clock) -> Self {
+    pub fn new(lines: &[LineSpec], groups: &[Group], seed: u64, clock: &dyn Clock) -> Self {
         assert!(!lines.is_empty(), "a banner needs at least one line");
         let lines: Vec<LineRuntime> = lines
             .iter()
@@ -311,6 +433,7 @@ impl BannerRuntime {
                     seed.wrapping_add(i as u64 * 7919),
                     l.speed,
                     l.style.clone(),
+                    groups,
                     clock,
                 )
             })
@@ -333,6 +456,7 @@ impl BannerRuntime {
                 speed,
                 style,
             }],
+            &demo_groups(),
             seed,
             clock,
         )
@@ -640,6 +764,7 @@ mod tests {
                     style: style("daylight"),
                 },
             ],
+            &demo_groups(),
             5,
             clock,
         )
