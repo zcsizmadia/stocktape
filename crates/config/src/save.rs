@@ -306,6 +306,32 @@ impl Config {
                 ),
             );
         }
+        if !self.labels.is_empty() {
+            let labels: Table = self
+                .labels
+                .iter()
+                .map(|(symbol, l)| {
+                    let value = match (l.unit.as_ref(), l.decimals) {
+                        (None, None) => Value::String(l.name.clone().unwrap_or_default()),
+                        _ => {
+                            let mut t = Table::new();
+                            if let Some(n) = &l.name {
+                                t.insert("name".into(), Value::String(n.clone()));
+                            }
+                            if let Some(u) = &l.unit {
+                                t.insert("unit".into(), Value::String(u.clone()));
+                            }
+                            if let Some(d) = l.decimals {
+                                t.insert("decimals".into(), Value::Integer(i64::from(d)));
+                            }
+                            Value::Table(t)
+                        }
+                    };
+                    (symbol.to_string(), value)
+                })
+                .collect();
+            root.insert("labels".into(), Value::Table(labels));
+        }
         root.insert(
             "banner".into(),
             Value::Array(
@@ -397,6 +423,11 @@ mod tests {
             refresh = 600
             [[news]]
             url = "http://example.org/atom.xml"
+
+            [labels]
+            "SPY" = "S&P 500 ETF"
+            "OANDA:XAU_USD" = { name = "GOLD", unit = "/oz" }
+            "OANDA:EUR_USD" = { name = "EUR/USD", decimals = 4 }
             "#,
         )
         .unwrap();

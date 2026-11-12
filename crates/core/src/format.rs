@@ -65,6 +65,20 @@ pub fn format_percent(percent: f64) -> String {
     s
 }
 
+/// Formats a number with exactly `decimals` decimal places and thousands
+/// separators; with `signed`, positive values get a `+`. For instruments
+/// whose precision differs from the price-based default (e.g. FX at 4).
+///
+/// ```
+/// use stocktape_core::format::format_fixed;
+/// assert_eq!(format_fixed(1.08321, 4, false), "1.0832");
+/// assert_eq!(format_fixed(-0.0012, 4, true), "−0.0012");
+/// ```
+#[must_use]
+pub fn format_fixed(value: f64, decimals: usize, signed: bool) -> String {
+    format_with(value, decimals.min(10), signed)
+}
+
 fn format_with(value: f64, decimals: usize, signed: bool) -> String {
     if !value.is_finite() {
         return "—".to_owned();

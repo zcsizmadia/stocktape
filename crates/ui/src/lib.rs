@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use eframe::egui;
 use stocktape_config::{
-    BannerConfig, Config, Content, FeedConfig, KeySource, LineConfig, NewsConfig, Provider,
+    BannerConfig, Config, Content, FeedConfig, KeySource, Label, LineConfig, NewsConfig, Provider,
     StrategyKind, presets, selector_from_text, selector_to_text,
 };
 use stocktape_core::Symbol;
@@ -59,6 +59,8 @@ struct Drafts {
     displays: Vec<(String, String)>,
     /// Per watchlist group: symbols.
     symbols: Vec<String>,
+    /// Symbol for a new display name.
+    new_label: String,
 }
 
 /// The settings window's state.
@@ -471,6 +473,89 @@ impl SettingsApp {
         }
     }
 
+    fn labels(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(16.0);
+        ui.heading("Display names");
+        ui.label("Show a symbol under another name, with a unit or fixed decimals, e.g. GOLD 3,412.20/oz or EUR/USD 1.0832.");
+        let mut remove = None;
+        egui::Grid::new("labels")
+            .num_columns(5)
+            .spacing([10.0, 6.0])
+            .show(ui, |ui| {
+                for (i, (symbol, label)) in self.config.labels.iter_mut().enumerate() {
+                    ui.label(symbol.to_string());
+                    let mut name = label.name.clone().unwrap_or_default();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut name)
+                                .hint_text("name")
+                                .desired_width(140.0),
+                        )
+                        .on_hover_text("Shown instead of the symbol")
+                        .changed()
+                    {
+                        label.name = (!name.trim().is_empty()).then(|| name.trim().to_owned());
+                    }
+                    let mut unit = label.unit.clone().unwrap_or_default();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut unit)
+                                .hint_text("unit, e.g. /oz")
+                                .desired_width(90.0),
+                        )
+                        .on_hover_text("Appended to the price")
+                        .changed()
+                    {
+                        label.unit = (!unit.is_empty()).then_some(unit);
+                    }
+                    ui.horizontal(|ui| {
+                        let mut fixed = label.decimals.is_some();
+                        if ui.checkbox(&mut fixed, "Decimals").changed() {
+                            label.decimals = fixed.then_some(2);
+                        }
+                        if let Some(d) = &mut label.decimals {
+                            ui.add(egui::DragValue::new(d).range(0..=10));
+                        }
+                    });
+                    if ui
+                        .push_id(("remove-label", i), |ui| ui.button("Remove"))
+                        .inner
+                        .clicked()
+                    {
+                        remove = Some(i);
+                    }
+                    ui.end_row();
+                }
+            });
+        if let Some(i) = remove {
+            self.config.labels.remove(i);
+        }
+        ui.horizontal(|ui| {
+            let label = ui.label("Symbol");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.drafts.new_label)
+                    .hint_text("e.g. OANDA:XAU_USD")
+                    .desired_width(180.0),
+            )
+            .labelled_by(label.id);
+            let parsed = self.drafts.new_label.trim().parse::<Symbol>();
+            let exists = parsed
+                .as_ref()
+                .is_ok_and(|s| self.config.labels.iter().any(|(t, _)| t == s));
+            if ui
+                .add_enabled(
+                    parsed.is_ok() && !exists,
+                    egui::Button::new("Add display name"),
+                )
+                .clicked()
+                && let Ok(symbol) = parsed
+            {
+                self.config.labels.push((symbol, Label::default()));
+                self.drafts.new_label.clear();
+            }
+        });
+    }
+
     fn watchlist(&mut self, ui: &mut egui::Ui) {
         ui.heading("Watchlist");
         let mut custom = self.config.watchlist.is_some();
@@ -493,6 +578,7 @@ impl SettingsApp {
             self.reset_drafts();
         }
         let Some(groups) = &mut self.config.watchlist else {
+            self.labels(ui);
             return;
         };
         ui.label(egui::RichText::new("Symbols are separated by commas or spaces; use EXCHANGE:TICKER for other exchanges, e.g. XLON:VOD.").weak());
@@ -547,6 +633,7 @@ impl SettingsApp {
             });
             self.drafts.symbols.push(String::new());
         }
+        self.labels(ui);
     }
 
     fn skins(&mut self, ui: &mut egui::Ui) {
@@ -899,3 +986,41 @@ impl eframe::App for Window {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod label_ui_tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn adding_a_display_name() {
+        let path =
+            std::env::temp_dir().join(format!("stocktape-ui-{}-labels.toml", std::process::id()));
+        let mut app = SettingsApp::new(
+            path,
+            Config::preset("bottom").unwrap(),
+            SkinLibrary::builtin(),
+            None,
+        );
+        app.tab = Tab::Watchlist;
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1000.0, 900.0))
+            .build_ui_state(|ui, app: &mut SettingsApp| app.ui(ui), app);
+        h.run();
+        "OANDA:XAU_USD".clone_into(&mut h.state_mut().drafts.new_label);
+        h.run();
+        // The button is only enabled for a valid, new symbol.
+        h.get_by_label("Add display name").click();
+        h.run();
+        assert_eq!(h.state().config().labels.len(), 1);
+        "OANDA:XAU_USD".clone_into(&mut h.state_mut().drafts.new_label);
+        h.run();
+        h.get_by_label("Add display name").click();
+        h.run();
+        // Adding the same symbol again is disabled.
+        let labels = &h.state().config().labels;
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].0.to_string(), "OANDA:XAU_USD");
+    }
+}

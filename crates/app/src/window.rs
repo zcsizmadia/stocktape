@@ -324,8 +324,9 @@ impl App {
         match loaded {
             Ok((config, banners)) => {
                 let groups = config.watchlist.clone().unwrap_or_else(demo_groups);
-                self.market =
-                    Market::from_config(&config.feeds, &groups, self.seed).with_news(&config.news);
+                self.market = Market::from_config(&config.feeds, &groups, self.seed)
+                    .with_news(&config.news)
+                    .with_labels(&config.labels);
                 self.banners = banners;
                 eprintln!("reloaded {}", cw.path.display());
                 self.check_displays(event_loop, true)
@@ -473,7 +474,9 @@ pub fn run(
     let event_loop = EventLoop::new()?;
     let mut app = App {
         clock,
-        market: Market::from_config(&config.feeds, &groups, seed).with_news(&config.news),
+        market: Market::from_config(&config.feeds, &groups, seed)
+            .with_news(&config.news)
+            .with_labels(&config.labels),
         banners,
         library,
         watch,
