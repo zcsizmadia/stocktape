@@ -4,7 +4,8 @@
 //! [[banner]]
 //! name = "Watchlist"
 //! place = "bottom"        # top | bottom | left | right | around
-//! displays = "primary"    # primary | all | 0, 1, ... | "name:DELL"
+//! displays = "primary"    # primary | all | landscape | portrait | index | name, or a list
+//! exclude = "portrait"    # same forms; displays to leave out
 //! skin = "classic-dark"
 //! speed = 120             # logical pixels per second
 //! offset = 0              # distance from the screen edge
@@ -80,11 +81,11 @@ place = "bottom"
     ),
     (
         "span",
-        "One belt along the bottom of every display, flowing from screen to screen",
+        "One belt along the bottom of every landscape display, flowing from screen to screen",
         r#"[[banner]]
 name = "Watchlist"
 place = "bottom"
-displays = "all"
+displays = "landscape"
 "#,
     ),
     (
@@ -98,11 +99,11 @@ speed = 160
     ),
     (
         "around-desktop",
-        "One belt running around the outer edge of all displays",
+        "One belt running around the outer edge of all landscape displays",
         r#"[[banner]]
 name = "Watchlist"
 place = "around"
-displays = "all"
+displays = "landscape"
 speed = 200
 "#,
     ),
@@ -164,7 +165,8 @@ impl Config {
 }
 
 const KEYS: &[&str] = &[
-    "name", "place", "displays", "skin", "speed", "offset", "inset", "reverse", "strategy",
+    "name", "place", "displays", "exclude", "skin", "speed", "offset", "inset", "reverse",
+    "strategy",
 ];
 
 fn number(t: &Table, key: &str, default: f64, min: f64, max: f64) -> Result<f64, String> {
@@ -191,25 +193,53 @@ fn string<'a>(t: &'a Table, key: &str, default: &'a str) -> Result<&'a str, Stri
     }
 }
 
-fn displays(t: &Table) -> Result<DisplaySelector, String> {
-    match t.get("displays") {
-        None => Ok(DisplaySelector::Primary),
-        Some(Value::Integer(i)) => usize::try_from(*i)
+/// One display reference: an index, a keyword, or (part of) a display name.
+fn display_ref(key: &str, value: &Value) -> Result<DisplaySelector, String> {
+    match value {
+        Value::Integer(i) => usize::try_from(*i)
             .map(DisplaySelector::Index)
-            .map_err(|_| "`displays` index must not be negative".to_owned()),
-        Some(Value::String(s)) => match s.as_str() {
-            "primary" => Ok(DisplaySelector::Primary),
-            "all" => Ok(DisplaySelector::All),
-            other => other
-                .strip_prefix("name:")
-                .filter(|n| !n.is_empty())
-                .map(|n| DisplaySelector::Name(n.to_owned()))
-                .ok_or_else(|| {
-                    format!("`displays` must be \"primary\", \"all\", an index or \"name:...\", not {other:?}")
-                }),
-        },
-        Some(_) => Err("`displays` must be a string or an index".to_owned()),
+            .map_err(|_| format!("`{key}` index must not be negative")),
+        Value::String(s) => Ok(match s.as_str() {
+            "primary" => DisplaySelector::Primary,
+            "all" => DisplaySelector::All,
+            "landscape" => DisplaySelector::Landscape,
+            "portrait" => DisplaySelector::Portrait,
+            other => {
+                let name = other.strip_prefix("name:").unwrap_or(other).trim();
+                if name.is_empty() {
+                    return Err(format!("`{key}` has an empty display name"));
+                }
+                DisplaySelector::Name(name.to_owned())
+            }
+        }),
+        _ => Err(format!(
+            "`{key}` entries must be display names, keywords or indexes"
+        )),
     }
+}
+
+/// A `displays`/`exclude` value: one reference or a list of them.
+fn display_set(key: &str, value: &Value) -> Result<DisplaySelector, String> {
+    match value {
+        Value::Array(list) if list.is_empty() => Err(format!("`{key}` list is empty")),
+        Value::Array(list) => list
+            .iter()
+            .map(|v| display_ref(key, v))
+            .collect::<Result<Vec<_>, _>>()
+            .map(DisplaySelector::AnyOf),
+        other => display_ref(key, other),
+    }
+}
+
+fn displays(t: &Table) -> Result<DisplaySelector, String> {
+    let include = match t.get("displays") {
+        None => DisplaySelector::Primary,
+        Some(v) => display_set("displays", v)?,
+    };
+    Ok(match t.get("exclude") {
+        None => include,
+        Some(v) => DisplaySelector::Except(Box::new(include), Box::new(display_set("exclude", v)?)),
+    })
 }
 
 fn banner(t: &Table) -> Result<BannerConfig, String> {
@@ -362,12 +392,49 @@ mod tests {
     }
 
     #[test]
+    fn display_lists_and_exclusions() {
+        let c = Config::parse(
+            r#"
+            [[banner]]
+            displays = ["DISPLAY2", 0, "name:DELL"]
+            [[banner]]
+            displays = "all"
+            exclude = "portrait"
+            [[banner]]
+            displays = "landscape"
+            "#,
+        )
+        .unwrap();
+        let selector = |i: usize| match &c.banners[i].placement {
+            Placement::Edge { displays, .. } | Placement::Around { displays } => displays.clone(),
+        };
+        assert_eq!(
+            selector(0),
+            DisplaySelector::AnyOf(vec![
+                DisplaySelector::Name("DISPLAY2".into()),
+                DisplaySelector::Index(0),
+                DisplaySelector::Name("DELL".into()),
+            ])
+        );
+        assert_eq!(
+            selector(1),
+            DisplaySelector::Except(
+                Box::new(DisplaySelector::All),
+                Box::new(DisplaySelector::Portrait)
+            )
+        );
+        assert_eq!(selector(2), DisplaySelector::Landscape);
+    }
+
+    #[test]
     fn errors_name_the_problem() {
         let err = |text: &str| Config::parse(text).unwrap_err();
         assert!(err("").contains("no banners"));
         assert!(err("[[banner]]\nplcae = \"top\"").contains("banner 1: unknown key `plcae`"));
         assert!(err("[[banner]]\nplace = \"middle\"").contains("`place` must be"));
-        assert!(err("[[banner]]\ndisplays = \"second\"").contains("`displays` must be"));
+        assert!(err("[[banner]]\ndisplays = \"\"").contains("empty display name"));
+        assert!(err("[[banner]]\ndisplays = []").contains("list is empty"));
+        assert!(err("[[banner]]\nexclude = [true]").contains("`exclude` entries"));
         assert!(err("[[banner]]\ndisplays = -1").contains("negative"));
         assert!(err("[[banner]]\nspeed = -5").contains("between"));
         assert!(err("[[banner]]\ninset = [1]").contains("[start, end]"));

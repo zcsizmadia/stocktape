@@ -93,6 +93,23 @@ pub enum DisplaySelector {
     Name(String),
     /// A display by its position in the platform's list (0-based).
     Index(usize),
+    /// Displays at least as wide as they are tall.
+    Landscape,
+    /// Displays taller than they are wide.
+    Portrait,
+    /// Every display matched by any of these.
+    AnyOf(Vec<DisplaySelector>),
+    /// Displays matched by the first selector but not the second, e.g. all
+    /// displays except the portrait ones.
+    Except(Box<DisplaySelector>, Box<DisplaySelector>),
+}
+
+impl Display {
+    /// Whether the display is at least as wide as it is tall.
+    #[must_use]
+    pub fn is_landscape(&self) -> bool {
+        self.rect.width >= self.rect.height
+    }
 }
 
 /// A screen edge.
@@ -255,10 +272,36 @@ impl fmt::Display for LayoutError {
 
 impl std::error::Error for LayoutError {}
 
-/// Picks the displays a selector refers to, as indexes into `displays`.
+/// Picks the displays a selector refers to, as indexes into `displays`,
+/// in ascending order without duplicates.
 #[must_use]
 pub fn select(displays: &[Display], selector: &DisplaySelector) -> Vec<usize> {
+    let mut picked = select_raw(displays, selector);
+    picked.sort_unstable();
+    picked.dedup();
+    picked
+}
+
+fn select_raw(displays: &[Display], selector: &DisplaySelector) -> Vec<usize> {
+    let matching = |keep: &dyn Fn(&Display) -> bool| -> Vec<usize> {
+        displays
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| keep(d))
+            .map(|(i, _)| i)
+            .collect()
+    };
     match selector {
+        DisplaySelector::Landscape => matching(&Display::is_landscape),
+        DisplaySelector::Portrait => matching(&|d| !d.is_landscape()),
+        DisplaySelector::AnyOf(list) => list.iter().flat_map(|s| select_raw(displays, s)).collect(),
+        DisplaySelector::Except(keep, drop) => {
+            let dropped = select_raw(displays, drop);
+            select_raw(displays, keep)
+                .into_iter()
+                .filter(|i| !dropped.contains(i))
+                .collect()
+        }
         DisplaySelector::Primary => displays
             .iter()
             .position(|d| d.primary)
@@ -518,6 +561,49 @@ mod tests {
             .collect();
         assert_eq!(select(&no_primary, &DisplaySelector::Primary), [0]);
         assert!(select(&[], &DisplaySelector::Primary).is_empty());
+    }
+
+    /// Landscape left and center, portrait on the right (the motivating
+    /// setup for choosing monitors).
+    fn with_portrait() -> Vec<Display> {
+        vec![
+            display(r"\\.\DISPLAY1", 0, 0, 1920, 1080, 1.0, true),
+            display(r"\\.\DISPLAY2", -1920, 0, 1920, 1080, 1.0, false),
+            display(r"\\.\DISPLAY3", 1920, -251, 1050, 1680, 1.0, false),
+        ]
+    }
+
+    #[test]
+    fn lists_orientation_and_exclusions() {
+        let d = with_portrait();
+        assert_eq!(select(&d, &DisplaySelector::Landscape), [0, 1]);
+        assert_eq!(select(&d, &DisplaySelector::Portrait), [2]);
+        let list = DisplaySelector::AnyOf(vec![
+            DisplaySelector::Name("display2".into()),
+            DisplaySelector::Index(0),
+            DisplaySelector::Index(0),
+            DisplaySelector::Name("missing".into()),
+        ]);
+        assert_eq!(select(&d, &list), [0, 1]);
+        let except = DisplaySelector::Except(
+            Box::new(DisplaySelector::All),
+            Box::new(DisplaySelector::Name("DISPLAY3".into())),
+        );
+        assert_eq!(select(&d, &except), [0, 1]);
+    }
+
+    #[test]
+    fn span_skips_the_portrait_monitor() {
+        let layout = plan(
+            &with_portrait(),
+            &edge(DisplaySelector::Landscape, Edge::Bottom),
+            &opts(),
+        )
+        .unwrap();
+        let used: Vec<usize> = layout.segments.iter().map(|s| s.display).collect();
+        // Left display first: it holds the belt's leading end.
+        assert_eq!(used, [1, 0]);
+        assert_eq!(layout.belt_len(), 3840.0);
     }
 
     #[test]
