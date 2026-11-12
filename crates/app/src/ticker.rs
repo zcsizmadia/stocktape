@@ -108,8 +108,8 @@ struct Entry {
     images: HashMap<u32, SegmentImage>,
 }
 
-/// One banner: its strategy, look and belt.
-pub struct BannerRuntime {
+/// One line of a banner: its strategy, look and belt.
+pub struct LineRuntime {
     strategy: Box<dyn Strategy>,
     belt: Belt<u64>,
     renderer: SegmentRenderer,
@@ -120,16 +120,16 @@ pub struct BannerRuntime {
     measure_scale: f32,
 }
 
-impl std::fmt::Debug for BannerRuntime {
+impl std::fmt::Debug for LineRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BannerRuntime")
+        f.debug_struct("LineRuntime")
             .field("items", &self.entries.len())
             .finish_non_exhaustive()
     }
 }
 
-impl BannerRuntime {
-    /// Creates a banner.
+impl LineRuntime {
+    /// Creates a line.
     pub fn new(
         kind: StrategyKind,
         seed: u64,
@@ -153,7 +153,7 @@ impl BannerRuntime {
         }
     }
 
-    /// The banner's thickness in logical pixels.
+    /// The line's thickness in logical pixels.
     pub fn thickness(&self) -> f64 {
         f64::from(self.renderer.style().height)
     }
@@ -222,18 +222,10 @@ impl BannerRuntime {
         entries.retain(|id, _| live.contains(id));
     }
 
-    /// Draws a segment's stretch of the belt into `strip` (resized to the
-    /// segment's length × thickness in physical pixels), ready for
-    /// [`present_strip`](stocktape_render::frame::present_strip).
-    pub fn render_segment(&mut self, segment: &Segment, strip: &mut Option<Pixmap>) {
-        let (len, thick) = (
-            segment.physical_len().max(1),
-            segment.physical_thickness().max(1),
-        );
-        let mut target = match strip.take() {
-            Some(p) if p.width() == len && p.height() == thick => p,
-            _ => Pixmap::new(len, thick).expect("non-zero strip size"),
-        };
+    /// Draws this line's stretch of the belt for `segment` into `target`
+    /// (the segment's length × this line's thickness, in physical pixels).
+    fn render_line(&mut self, segment: &Segment, target: &mut Pixmap) {
+        let len = target.width();
         #[allow(clippy::cast_possible_truncation)]
         let scale = segment.scale as f32;
         let viewport = segment.belt_start + segment.belt_len;
@@ -269,7 +261,169 @@ impl BannerRuntime {
                 #[allow(clippy::cast_possible_truncation)]
                 Some((&image.pixmap, x.round() as i32))
             });
-        compose(&mut target, self.renderer.style().background, items);
+        compose(target, self.renderer.style().background, items);
+    }
+}
+
+/// One line's settings, for building a [`BannerRuntime`].
+#[derive(Debug, Clone)]
+pub struct LineSpec {
+    /// What the line shows.
+    pub strategy: StrategyKind,
+    /// Scroll speed in logical pixels per second.
+    pub speed: f64,
+    /// The line's look; its height is the line's thickness.
+    pub style: BannerStyle,
+}
+
+/// One banner: one or more lines stacked across its thickness, each with its
+/// own belt, so each can scroll at its own speed. All lines share the
+/// banner's segments, so they cross monitors and corners together.
+pub struct BannerRuntime {
+    lines: Vec<LineRuntime>,
+    /// Per-line strips, reused between frames.
+    line_strips: Vec<Option<Pixmap>>,
+}
+
+impl std::fmt::Debug for BannerRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BannerRuntime")
+            .field("lines", &self.lines.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl BannerRuntime {
+    /// Creates a banner with the given lines (top line first); `seed` varies
+    /// random choices between lines.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `lines` is empty.
+    pub fn new(lines: &[LineSpec], seed: u64, clock: &dyn Clock) -> Self {
+        assert!(!lines.is_empty(), "a banner needs at least one line");
+        let lines: Vec<LineRuntime> = lines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                LineRuntime::new(
+                    l.strategy,
+                    seed.wrapping_add(i as u64 * 7919),
+                    l.speed,
+                    l.style.clone(),
+                    clock,
+                )
+            })
+            .collect();
+        let line_strips = lines.iter().map(|_| None).collect();
+        Self { lines, line_strips }
+    }
+
+    /// A one-line banner.
+    pub fn single(
+        kind: StrategyKind,
+        seed: u64,
+        speed: f64,
+        style: BannerStyle,
+        clock: &dyn Clock,
+    ) -> Self {
+        Self::new(
+            &[LineSpec {
+                strategy: kind,
+                speed,
+                style,
+            }],
+            seed,
+            clock,
+        )
+    }
+
+    /// The banner's thickness in logical pixels: all lines together.
+    pub fn thickness(&self) -> f64 {
+        self.lines.iter().map(LineRuntime::thickness).sum()
+    }
+
+    /// Sets the scale used to measure new items on every line.
+    pub fn set_measure_scale(&mut self, scale: f64) {
+        for line in &mut self.lines {
+            line.set_measure_scale(scale);
+        }
+    }
+
+    /// Restyles the lines (one style per line, top first; extra styles are
+    /// ignored, missing ones leave a line as it is).
+    pub fn set_styles(&mut self, styles: Vec<BannerStyle>) {
+        for (line, style) in self.lines.iter_mut().zip(styles) {
+            line.set_style(style);
+        }
+    }
+
+    /// Advances every line to the clock's time.
+    pub fn update(&mut self, market: &Market, clock: &dyn Clock, viewport: f64) {
+        for line in &mut self.lines {
+            line.update(market, clock, viewport);
+        }
+    }
+
+    /// Physical thickness of each line on a segment: rounded per line, with
+    /// the last line taking up any rounding difference so the lines fill the
+    /// segment exactly.
+    fn line_thicknesses(&self, segment: &Segment) -> Vec<u32> {
+        let total = segment.physical_thickness().max(1);
+        let mut used = 0u32;
+        let n = self.lines.len();
+        self.lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let t = if i + 1 == n {
+                    total.saturating_sub(used)
+                } else {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let t = (line.thickness() * segment.scale).round() as u32;
+                    t.min(total.saturating_sub(used))
+                };
+                used += t;
+                t
+            })
+            .collect()
+    }
+
+    /// Draws a segment's stretch of every line into `strip` (resized to the
+    /// segment's length × thickness in physical pixels), top line first,
+    /// ready for [`present_strip`](stocktape_render::frame::present_strip).
+    pub fn render_segment(&mut self, segment: &Segment, strip: &mut Option<Pixmap>) {
+        let (len, thick) = (
+            segment.physical_len().max(1),
+            segment.physical_thickness().max(1),
+        );
+        let mut target = match strip.take() {
+            Some(p) if p.width() == len && p.height() == thick => p,
+            _ => Pixmap::new(len, thick).expect("non-zero strip size"),
+        };
+        let row_bytes = len as usize * 4;
+        let thicknesses = self.line_thicknesses(segment);
+        let mut row = 0usize;
+        for ((line, slot), t) in self
+            .lines
+            .iter_mut()
+            .zip(&mut self.line_strips)
+            .zip(thicknesses)
+        {
+            if t == 0 {
+                continue;
+            }
+            let mut line_strip = match slot.take() {
+                Some(p) if p.width() == len && p.height() == t => p,
+                _ => Pixmap::new(len, t).expect("non-zero line size"),
+            };
+            line.render_line(segment, &mut line_strip);
+            let bytes = line_strip.data();
+            let start = row * row_bytes;
+            target.data_mut()[start..start + bytes.len()].copy_from_slice(bytes);
+            row += t as usize;
+            *slot = Some(line_strip);
+        }
         *strip = Some(target);
     }
 }
@@ -291,7 +445,7 @@ pub fn preview_frame(skin: &stocktape_skin::Skin, width: u32) -> Pixmap {
         stocktape_core::Timestamp::from_second(PREVIEW_EPOCH).expect("valid preview time"),
     );
     let mut market = Market::demo(7);
-    let mut banner = BannerRuntime::new(
+    let mut banner = BannerRuntime::single(
         StrategyKind::Demo,
         7,
         240.0,
@@ -331,7 +485,7 @@ mod tests {
     }
 
     fn banner(speed: f64, clock: &dyn Clock) -> BannerRuntime {
-        BannerRuntime::new(StrategyKind::Demo, 1, speed, BannerStyle::default(), clock)
+        BannerRuntime::single(StrategyKind::Demo, 1, speed, BannerStyle::default(), clock)
     }
 
     fn run(
@@ -470,6 +624,88 @@ mod tests {
         assert!(ink(&right, 0..350) > 100 && ink(&right, 450..800) == 0);
     }
 
+    fn two_lines(clock: &dyn Clock) -> BannerRuntime {
+        let skins = stocktape_skin::SkinLibrary::builtin();
+        let style = |id: &str| BannerStyle::from(&skins.resolve(id).unwrap());
+        BannerRuntime::new(
+            &[
+                LineSpec {
+                    strategy: StrategyKind::Movers,
+                    speed: 300.0,
+                    style: style("classic-dark"),
+                },
+                LineSpec {
+                    strategy: StrategyKind::Watchlist,
+                    speed: 100.0,
+                    style: style("daylight"),
+                },
+            ],
+            5,
+            clock,
+        )
+    }
+
+    #[test]
+    fn lines_scroll_at_their_own_speeds() {
+        let clock = clock();
+        let mut market = Market::demo(5);
+        let mut b = two_lines(&clock);
+        assert_eq!(b.thickness(), 56.0 + 52.0);
+        run(&mut market, &mut b, &clock, 1000.0, 125);
+        // After 2 s: 600 px of travel on the fast line, 200 px on the slow one.
+        let offsets: Vec<f64> = b.lines.iter().map(|l| l.belt.offset()).collect();
+        assert!((offsets[0] - 600.0).abs() < 1.0, "{offsets:?}");
+        assert!((offsets[1] - 200.0).abs() < 1.0, "{offsets:?}");
+    }
+
+    #[test]
+    fn lines_stack_in_the_strip() {
+        let clock = clock();
+        let mut market = Market::demo(6);
+        let mut b = two_lines(&clock);
+        run(&mut market, &mut b, &clock, 1000.0, 400);
+        let segment = Segment {
+            display: 0,
+            rect: Rect::new(0, 0, 1000, 108),
+            scale: 1.0,
+            flow: Flow::Left,
+            belt_start: 0.0,
+            belt_len: 1000.0,
+        };
+        let mut strip = None;
+        b.render_segment(&segment, &mut strip);
+        let strip = strip.unwrap();
+        assert_eq!((strip.width(), strip.height()), (1000, 108));
+        let pixel = |x: u32, y: u32| {
+            let i = ((y * 1000 + x) * 4) as usize;
+            strip.data()[i..i + 4].to_vec()
+        };
+        // Top line has Classic Dark's navy background, the bottom line
+        // Daylight's white, at least somewhere in their rows.
+        let row_has = |y: u32, rgba: [u8; 4]| (0..1000).any(|x| pixel(x, y) == rgba);
+        assert!(row_has(1, [0x0E, 0x1A, 0x2F, 0xFF]));
+        assert!(row_has(106, [0xFF, 0xFF, 0xFF, 0xFF]));
+        assert!(!row_has(106, [0x0E, 0x1A, 0x2F, 0xFF]));
+    }
+
+    #[test]
+    fn line_thicknesses_fill_the_segment_exactly() {
+        let clock = clock();
+        let b = two_lines(&clock);
+        let segment = |scale: f64, thick: u32| Segment {
+            display: 0,
+            rect: Rect::new(0, 0, thick, 500),
+            scale,
+            flow: Flow::Up,
+            belt_start: 0.0,
+            belt_len: 500.0,
+        };
+        assert_eq!(b.line_thicknesses(&segment(1.0, 108)), [56, 52]);
+        // 1.25 × 108 = 135; 1.25 × 56 = 70 → 65 for the second line.
+        assert_eq!(b.line_thicknesses(&segment(1.25, 135)), [70, 65]);
+        assert_eq!(b.line_thicknesses(&segment(1.0, 30)), [30, 0]);
+    }
+
     #[test]
     fn set_style_restarts_with_new_thickness() {
         let clock = clock();
@@ -479,8 +715,8 @@ mod tests {
         let terminal = stocktape_skin::SkinLibrary::builtin()
             .resolve("terminal")
             .unwrap();
-        b.set_style(BannerStyle::from(&terminal));
-        assert_eq!(b.entries.len(), 0);
+        b.set_styles(vec![BannerStyle::from(&terminal)]);
+        assert_eq!(b.lines[0].entries.len(), 0);
         assert_eq!(b.thickness(), 44.0);
     }
 
@@ -490,7 +726,11 @@ mod tests {
         let mut market = Market::demo(1);
         let mut b = banner(2_000.0, &clock);
         run(&mut market, &mut b, &clock, 400.0, 600);
-        assert!(b.entries.len() < 12, "{}", b.entries.len());
+        assert!(
+            b.lines[0].entries.len() < 12,
+            "{}",
+            b.lines[0].entries.len()
+        );
     }
 
     #[test]

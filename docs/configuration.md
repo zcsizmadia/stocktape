@@ -16,6 +16,7 @@ stocktape --layout around --skin daylight
 |---|---|
 | `bottom` (default) | One banner along the bottom of the primary display |
 | `top-bottom` | Movers on top, the watchlist along the bottom |
+| `two-tier` | Two lines along the bottom: fast movers above the slower watchlist |
 | `span` | One belt along the bottom of every landscape display, flowing from screen to screen |
 | `around` | One belt around the edges of the primary display |
 | `around-desktop` | One belt around the outer edge of all landscape displays (side by side) |
@@ -86,6 +87,31 @@ reverse = true          # flow downward instead of upward
 | `strategy` | `demo`, `watchlist`, `movers` | `demo` |
 
 Unknown keys and bad values are errors that name the banner and key.
+
+### Lines: several belts in one banner
+
+A banner can stack several lines, each scrolling at its own speed with its own
+skin and strategy. Add `[[banner.line]]` tables after the banner; a line
+inherits the banner's `skin`, `speed` and `strategy` unless it sets its own:
+
+```toml
+[[banner]]
+name = "Two-tier"
+place = "bottom"
+
+[[banner.line]]             # top line
+strategy = "movers"
+speed = 180
+
+[[banner.line]]             # bottom line
+skin = "daylight"
+strategy = "watchlist"
+speed = 90
+```
+
+Each line is as tall as its skin, and the banner is as tall as its lines
+together (docking reserves the full height). All lines share the banner's
+placement, so they cross monitors and go around corners together.
 
 ### How banners behave
 
