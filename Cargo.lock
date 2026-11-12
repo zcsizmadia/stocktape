@@ -434,6 +434,7 @@ dependencies = [
 name = "stocktape-layout"
 version = "0.0.0"
 dependencies = [
+ "proptest",
  "stocktape-core",
 ]
 
