@@ -12,6 +12,9 @@ use stocktape_layout::{Belt, BeltConfig, BeltItem, Snap};
 use stocktape_render::frame::compose;
 use stocktape_render::{BannerStyle, QuoteSegment, SegmentImage, SegmentRenderer};
 use stocktape_sources::mock::MockFeed;
+use stocktape_strategies::{
+    Caps, Context, Group, HighlightRules, Highlights, Item, Mix, Movers, Strategy, Watchlist,
+};
 use tiny_skia::Pixmap;
 
 /// How often the mock feed produces new prices.
@@ -19,12 +22,33 @@ const FEED_INTERVAL: Duration = Duration::from_secs(1);
 /// Price points kept per symbol.
 const HISTORY: usize = 120;
 
+/// The demo's strategy: the watchlist in sector groups, with a big mover
+/// slotted in after every three items, repeats kept 20 s apart, and big moves
+/// and new highs/lows highlighted.
+fn demo_strategy(seed: u64) -> Box<dyn Strategy> {
+    let sym = |s: &str| -> Symbol { s.parse().expect("demo symbols are valid") };
+    let watchlist = Watchlist::grouped(vec![
+        Group::titled(
+            "Tech",
+            ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "TSLA"].map(sym),
+        ),
+        Group::titled("Banks & Energy", ["JPM", "XOM"].map(sym)),
+        Group::titled("Crypto", ["BTC-USD"].map(sym)),
+    ]);
+    let mix = Mix::new()
+        .with(watchlist, 3)
+        .with(Movers::new(seed).min_move(0.5), 1);
+    Box::new(Highlights::new(
+        Caps::new(mix, Duration::from_secs(20)),
+        HighlightRules::default(),
+    ))
+}
+
 /// A running banner: feed, quote store, belt and drawn segments.
 pub struct Ticker {
     feed: MockFeed,
     store: QuoteStore,
-    order: Vec<Symbol>,
-    next: usize,
+    strategy: Box<dyn Strategy>,
     belt: Belt<u64>,
     renderer: SegmentRenderer,
     images: HashMap<u64, SegmentImage>,
@@ -37,7 +61,7 @@ pub struct Ticker {
 impl std::fmt::Debug for Ticker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Ticker")
-            .field("symbols", &self.order.len())
+            .field("symbols", &self.store.len())
             .field("segments", &self.images.len())
             .field("scale", &self.scale)
             .finish_non_exhaustive()
@@ -48,7 +72,6 @@ impl Ticker {
     /// Creates a ticker with the demo mock feed.
     pub fn demo(seed: u64, speed: f64, scale: f32, style: BannerStyle, clock: &dyn Clock) -> Self {
         let feed = MockFeed::demo(seed);
-        let order = feed.symbols().cloned().collect();
         let config = BeltConfig {
             speed,
             gap: 0.0,
@@ -58,8 +81,7 @@ impl Ticker {
         Self {
             feed,
             store: QuoteStore::new(HISTORY),
-            order,
-            next: 0,
+            strategy: demo_strategy(seed),
             belt: Belt::new(config, clock.monotonic()),
             renderer: SegmentRenderer::new(style),
             images: HashMap::new(),
@@ -121,8 +143,7 @@ impl Ticker {
         let viewport = f64::from(width) / f64::from(self.scale);
         let Self {
             store,
-            order,
-            next,
+            strategy,
             belt,
             renderer,
             images,
@@ -131,25 +152,25 @@ impl Ticker {
             ..
         } = self;
         let scale = *scale;
+        let wall = clock.wall();
 
-        // Prototype strategy: round-robin over the watchlist. Strategies (#6)
-        // replace this.
-        let mut source = |_now| {
-            for _ in 0..order.len() {
-                let symbol = &order[*next % order.len()];
-                *next = (*next + 1) % order.len();
-                if let Some(entry) = store.get(symbol) {
+        let mut source = |now| {
+            let ctx = Context { store, now, wall };
+            let image = match strategy.next(&ctx)? {
+                Item::Header(title) => renderer.draw_header(&title, scale),
+                Item::Quote { symbol, highlight } => {
+                    let entry = store.get(&symbol)?;
                     let segment = QuoteSegment::from_quote(entry.quote())
-                        .with_history(entry.history().map(|(_, price)| price));
-                    let image = renderer.draw(&segment, scale);
-                    let width = image.logical_width;
-                    let id = *next_id;
-                    *next_id += 1;
-                    images.insert(id, image);
-                    return Some(BeltItem::new(id, width));
+                        .with_history(entry.history().map(|(_, price)| price))
+                        .with_highlight(highlight.is_some());
+                    renderer.draw(&segment, scale)
                 }
-            }
-            None
+            };
+            let width = image.logical_width;
+            let id = *next_id;
+            *next_id += 1;
+            images.insert(id, image);
+            Some(BeltItem::new(id, width))
         };
         belt.update(clock.monotonic(), viewport, &mut source);
 
@@ -177,7 +198,7 @@ impl Ticker {
 }
 
 /// A fixed point in time for previews and tests (2026-11-12 15:30 UTC).
-const PREVIEW_EPOCH: i64 = 1_794_583_800;
+const PREVIEW_EPOCH: i64 = 1_794_497_400;
 
 /// Renders a demo frame of `skin`, `width` pixels wide, as it looks after the
 /// belt has filled. Always the same image for the same skin and width.
@@ -234,7 +255,7 @@ mod tests {
 
     fn clock() -> ManualClock {
         // 2026-11-12 15:30:00 UTC, a fixed time so tests are repeatable.
-        ManualClock::new(Timestamp::from_second(1_794_583_800).unwrap())
+        ManualClock::new(Timestamp::from_second(1_794_497_400).unwrap())
     }
 
     #[test]

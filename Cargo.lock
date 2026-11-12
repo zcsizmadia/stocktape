@@ -1970,6 +1970,8 @@ dependencies = [
 name = "stocktape-strategies"
 version = "0.0.0"
 dependencies = [
+ "jiff",
+ "proptest",
  "stocktape-core",
 ]
 
