@@ -592,6 +592,8 @@ pub struct FeedConfig {
     pub names: Vec<(Symbol, String)>,
     /// Time between snapshot rounds.
     pub refresh: Duration,
+    /// Request limit of your plan (Massive; default 5).
+    pub requests_per_minute: u32,
     /// Stream live trades; without it, only snapshots every `refresh`.
     pub stream: bool,
 }
@@ -604,6 +606,7 @@ impl std::fmt::Debug for FeedConfig {
             .field("api_key", &key)
             .field("names", &self.names)
             .field("refresh", &self.refresh)
+            .field("requests_per_minute", &self.requests_per_minute)
             .field("stream", &self.stream)
             .finish()
     }
@@ -616,6 +619,8 @@ pub enum Provider {
     Mock,
     /// Finnhub (REST and WebSocket).
     Finnhub,
+    /// Massive, formerly Polygon.io (batched REST snapshots).
+    Massive,
 }
 
 const FEED_KEYS: &[&str] = &[
@@ -625,6 +630,7 @@ const FEED_KEYS: &[&str] = &[
     "symbols",
     "refresh",
     "stream",
+    "requests_per_minute",
 ];
 
 /// `[[feed]]` tables, primary first. The API key comes from `api_key_env`
@@ -660,10 +666,13 @@ fn feed(t: &Table, env: &dyn Fn(&str) -> Option<String>) -> Result<FeedConfig, S
     }
     let provider = match string(t, "provider", "")? {
         "finnhub" => Provider::Finnhub,
+        "massive" => Provider::Massive,
         "mock" => Provider::Mock,
-        "" => return Err("missing `provider` (finnhub or mock)".to_owned()),
+        "" => return Err("missing `provider` (finnhub, massive or mock)".to_owned()),
         other => {
-            return Err(format!("`provider` must be finnhub or mock, not {other:?}"));
+            return Err(format!(
+                "`provider` must be finnhub, massive or mock, not {other:?}"
+            ));
         }
     };
     let api_key = match t.get("api_key") {
@@ -671,8 +680,12 @@ fn feed(t: &Table, env: &dyn Fn(&str) -> Option<String>) -> Result<FeedConfig, S
             .as_str()
             .ok_or_else(|| "`api_key` must be a string".to_owned())?
             .to_owned(),
-        None if provider == Provider::Finnhub => {
-            let var = string(t, "api_key_env", "FINNHUB_API_KEY")?;
+        None if provider != Provider::Mock => {
+            let default_env = match provider {
+                Provider::Massive => "MASSIVE_API_KEY",
+                _ => "FINNHUB_API_KEY",
+            };
+            let var = string(t, "api_key_env", default_env)?;
             env(var).filter(|k| !k.trim().is_empty()).ok_or_else(|| {
                 format!("no API key: set the {var} environment variable (or `api_key`)")
             })?
@@ -701,7 +714,27 @@ fn feed(t: &Table, env: &dyn Fn(&str) -> Option<String>) -> Result<FeedConfig, S
         provider,
         api_key: api_key.trim().to_owned(),
         names,
-        refresh: Duration::from_secs_f64(number(t, "refresh", 300.0, 10.0, 86_400.0)?),
+        refresh: Duration::from_secs_f64(number(
+            t,
+            "refresh",
+            if provider == Provider::Massive {
+                60.0
+            } else {
+                300.0
+            },
+            10.0,
+            86_400.0,
+        )?),
+        requests_per_minute: {
+            let default = if provider == Provider::Massive {
+                5.0
+            } else {
+                60.0
+            };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = number(t, "requests_per_minute", default, 1.0, 100_000.0)?.round() as u32;
+            n
+        },
         stream: match t.get("stream") {
             None => true,
             Some(v) => v
@@ -827,6 +860,33 @@ provider = \"mock\"",
         )
         .unwrap();
         assert_eq!(defaults[0].refresh, Duration::from_secs(300));
+        let massive = parse_feeds(
+            "[[feed]]
+provider = \"massive\"",
+            &[("MASSIVE_API_KEY", "m")],
+        )
+        .unwrap();
+        assert_eq!(massive[0].provider, Provider::Massive);
+        assert_eq!(massive[0].api_key, "m");
+        assert_eq!(
+            massive[0].refresh,
+            Duration::from_secs(60),
+            "free-plan default"
+        );
+        assert_eq!(massive[0].requests_per_minute, 5);
+        let paid = parse_feeds(
+            "[[feed]]
+provider = \"massive\"
+api_key = \"m\"
+requests_per_minute = 100
+refresh = 15",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            (paid[0].requests_per_minute, paid[0].refresh),
+            (100, Duration::from_secs(15))
+        );
         assert!(defaults[0].stream);
         assert!(
             parse_feeds(
@@ -859,7 +919,7 @@ refresh = 1",
         assert!(
             parse_feeds("[[feed]]\nprovider = \"yahoo\"", &[])
                 .unwrap_err()
-                .contains("finnhub or mock")
+                .contains("finnhub, massive or mock")
         );
         assert!(
             parse_feeds("[[feed]]\nprovider = \"mock\"\ntoken = 1", &[])

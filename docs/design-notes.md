@@ -182,7 +182,11 @@ composable:
 - `trait QuoteSource`; providers swappable.
 - Candidates: Finnhub (WebSocket), Alpaca (WebSocket, IEX), Polygon.io,
   Twelve Data, Tiingo, Alpha Vantage. IEX Cloud shut down in 2024.
-- Yahoo Finance endpoints are unofficial and against its terms: prototype only.
+- Official APIs only. Yahoo Finance endpoints are unofficial and against its
+  terms, and CNBC has no API: neither is supported (decided 2026-11-12).
+  Publishers' headlines can come through their RSS feeds (#27).
+- Massive (formerly Polygon.io, renamed late 2025) is the second provider;
+  its free plan allows about 5 requests a minute, so it batches symbols.
 - Real-time US exchange data carries display fees; 15-minute delayed data is
   cheaper or free. Users supply their own keys; the project never redistributes
   quote data.
