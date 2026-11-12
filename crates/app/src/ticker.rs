@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
+use stocktape_core::format::format_fixed;
 use stocktape_core::{Clock, Headline, QuoteStore, Symbol, Timestamp};
 use stocktape_layout::{Belt, BeltConfig, BeltItem, Flow, Segment, Snap};
 use stocktape_render::frame::compose;
@@ -21,7 +22,7 @@ use stocktape_strategies::{
 };
 use tiny_skia::Pixmap;
 
-use stocktape_config::{Content, FeedConfig, NewsConfig, Provider, StrategyKind};
+use stocktape_config::{Content, FeedConfig, Label, NewsConfig, Provider, StrategyKind};
 
 /// How often the mock feed produces new prices.
 const FEED_INTERVAL: Duration = Duration::from_secs(1);
@@ -54,6 +55,7 @@ pub struct Market {
     stale_after: Option<Duration>,
     news: Option<News>,
     headlines: Vec<Headline>,
+    labels: HashMap<Symbol, Label>,
 }
 
 /// Running news feeds.
@@ -108,7 +110,15 @@ impl Market {
             stale_after: None,
             news: None,
             headlines: Vec::new(),
+            labels: HashMap::new(),
         }
+    }
+
+    /// Sets how particular symbols are shown (name, unit, decimals).
+    #[must_use]
+    pub fn with_labels(mut self, labels: &[(Symbol, Label)]) -> Self {
+        self.labels = labels.iter().cloned().collect();
+        self
     }
 
     /// Starts news feeds for headline lines.
@@ -226,6 +236,7 @@ impl Market {
             stale_after: Some(STALE_AFTER),
             news: None,
             headlines: Vec::new(),
+            labels: HashMap::new(),
         }
     }
 
@@ -486,12 +497,11 @@ impl LineRuntime {
                 Item::Text(text) => Piece::Text(text),
                 Item::Quote { symbol, highlight } => {
                     let entry = store.get(&symbol)?;
-                    Piece::Quote(
-                        QuoteSegment::from_quote(entry.quote())
-                            .with_history(entry.history().map(|(_, price)| price))
-                            .with_highlight(highlight.is_some())
-                            .with_stale(market.is_stale(&symbol, now)),
-                    )
+                    let segment = QuoteSegment::from_quote(entry.quote())
+                        .with_history(entry.history().map(|(_, price)| price))
+                        .with_highlight(highlight.is_some())
+                        .with_stale(market.is_stale(&symbol, now));
+                    Piece::Quote(labelled(segment, entry.quote(), market.labels.get(&symbol)))
                 }
             };
             let image = draw(renderer, &content, scale);
@@ -716,6 +726,31 @@ impl BannerRuntime {
         }
         *strip = Some(target);
     }
+}
+
+/// Applies a symbol's label: a display name, fixed decimals and a unit.
+fn labelled(
+    mut segment: QuoteSegment,
+    quote: &stocktape_core::Quote,
+    label: Option<&Label>,
+) -> QuoteSegment {
+    let Some(label) = label else {
+        return segment;
+    };
+    if let Some(name) = &label.name {
+        segment.symbol.clone_from(name);
+    }
+    if let Some(d) = label.decimals {
+        let d = usize::from(d);
+        segment.price = format_fixed(quote.last, d, false);
+        if let Some(change) = quote.change() {
+            segment.change = format_fixed(change, d, true);
+        }
+    }
+    if let Some(unit) = &label.unit {
+        segment.price.push_str(unit);
+    }
+    segment
 }
 
 /// `SOURCE · 10:42` (local time) for a headline, or just the source.
@@ -1048,6 +1083,41 @@ mod tests {
             published: published.map(|s| Timestamp::from_second(s).unwrap()),
             link: None,
         }
+    }
+
+    #[test]
+    fn labels_rename_and_reformat_quotes() {
+        let quote = stocktape_core::Quote::new(
+            "OANDA:EUR_USD".parse().unwrap(),
+            1.08321,
+            Timestamp::UNIX_EPOCH,
+        )
+        .with_previous_close(1.08);
+        let plain = QuoteSegment::from_quote(&quote);
+        assert_eq!(
+            (plain.symbol.as_str(), plain.price.as_str()),
+            ("EUR_USD", "1.08")
+        );
+        let fx = Label {
+            name: Some("EUR/USD".into()),
+            unit: None,
+            decimals: Some(4),
+        };
+        let s = labelled(plain.clone(), &quote, Some(&fx));
+        assert_eq!(
+            (s.symbol.as_str(), s.price.as_str(), s.change.as_str()),
+            ("EUR/USD", "1.0832", "+0.0032")
+        );
+        let gold = Label {
+            name: Some("GOLD".into()),
+            unit: Some("/oz".into()),
+            decimals: None,
+        };
+        assert_eq!(
+            labelled(plain.clone(), &quote, Some(&gold)).price,
+            "1.08/oz"
+        );
+        assert_eq!(labelled(plain.clone(), &quote, None), plain);
     }
 
     #[test]

@@ -117,6 +117,19 @@ pub struct Config {
     pub watchlist: Option<Vec<Group>>,
     /// News feeds for headline lines.
     pub news: Vec<NewsConfig>,
+    /// How particular symbols are shown (name, unit, decimals).
+    pub labels: Vec<(Symbol, Label)>,
+}
+
+/// How a symbol is shown on the banner.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Label {
+    /// Shown instead of the ticker, e.g. `GOLD` for `OANDA:XAU_USD`.
+    pub name: Option<String>,
+    /// Appended to the price, e.g. `/oz` or `/bbl`.
+    pub unit: Option<String>,
+    /// Decimal places for the price and change, e.g. 4 for FX.
+    pub decimals: Option<u8>,
 }
 
 mod save;
@@ -248,7 +261,7 @@ impl Config {
             .map_err(|e: toml::de::Error| format!("invalid TOML: {}", e.to_string().trim()))?;
         if let Some(key) = table
             .keys()
-            .find(|k| !["banner", "feed", "watchlist", "news"].contains(&k.as_str()))
+            .find(|k| !["banner", "feed", "watchlist", "news", "labels"].contains(&k.as_str()))
         {
             return Err(format!("unknown key `{key}`"));
         }
@@ -273,6 +286,7 @@ impl Config {
             feeds: feeds(&table)?,
             watchlist: watchlist(&table)?,
             news: news(&table)?,
+            labels: labels(&table)?,
         })
     }
 }
@@ -494,6 +508,59 @@ fn messages(t: &Table, default: &[String]) -> Result<Vec<String>, String> {
 }
 
 const NEWS_KEYS: &[&str] = &["url", "name", "refresh"];
+const LABEL_KEYS: &[&str] = &["name", "unit", "decimals"];
+
+/// `[labels]`: `"SYMBOL" = "Name"` or `"SYMBOL" = { name, unit, decimals }`.
+fn labels(table: &Table) -> Result<Vec<(Symbol, Label)>, String> {
+    let Some(value) = table.get("labels") else {
+        return Ok(Vec::new());
+    };
+    let Value::Table(map) = value else {
+        return Err(
+            "`labels` must be a table of symbol = name or { name, unit, decimals }".to_owned(),
+        );
+    };
+    map.iter()
+        .map(|(key, v)| {
+            let err = |e: String| format!("labels.{key}: {e}");
+            let symbol: Symbol = key.parse().map_err(|e| err(format!("{e}")))?;
+            let label = match v {
+                Value::String(name) => Label {
+                    name: Some(name.clone()),
+                    ..Label::default()
+                },
+                Value::Table(t) => {
+                    if let Some(k) = t.keys().find(|k| !LABEL_KEYS.contains(&k.as_str())) {
+                        return Err(err(format!("unknown key `{k}`")));
+                    }
+                    let text = |k: &str| -> Result<Option<String>, String> {
+                        match t.get(k) {
+                            None => Ok(None),
+                            Some(v) => v
+                                .as_str()
+                                .map(|s| Some(s.to_owned()))
+                                .ok_or_else(|| err(format!("`{k}` must be a string"))),
+                        }
+                    };
+                    let decimals = match t.get("decimals") {
+                        None => None,
+                        Some(Value::Integer(d)) if (0..=10).contains(d) => {
+                            Some(u8::try_from(*d).unwrap_or(0))
+                        }
+                        Some(_) => return Err(err("`decimals` must be 0 to 10".to_owned())),
+                    };
+                    Label {
+                        name: text("name")?,
+                        unit: text("unit")?,
+                        decimals,
+                    }
+                }
+                _ => return Err(err("must be a name or { name, unit, decimals }".to_owned())),
+            };
+            Ok((symbol, label))
+        })
+        .collect()
+}
 
 /// `[[news]]` feeds.
 fn news(table: &Table) -> Result<Vec<NewsConfig>, String> {
@@ -1033,6 +1100,7 @@ mod feed_tests {
             feeds: missing,
             watchlist: None,
             news: Vec::new(),
+            labels: Vec::new(),
         };
         let err = config.check_keys().unwrap_err();
         assert!(
@@ -1190,5 +1258,35 @@ mod news_tests {
             err("[[banner]]\n[[news]]\nurl = \"https://x\"\nfeed = 1")
                 .contains("unknown key `feed`")
         );
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    #[test]
+    fn labels() {
+        let c = Config::parse(
+            "[[banner]]\n[labels]\n\"SPY\" = \"S&P 500 ETF\"\n\"OANDA:XAU_USD\" = { name = \"GOLD\", unit = \"/oz\" }\n\"OANDA:EUR_USD\" = { name = \"EUR/USD\", decimals = 4 }",
+        )
+        .unwrap();
+        let find = |s: &str| {
+            c.labels
+                .iter()
+                .find(|(sym, _)| sym.to_string() == s)
+                .map(|(_, l)| l.clone())
+                .unwrap()
+        };
+        assert_eq!(find("SPY").name.as_deref(), Some("S&P 500 ETF"));
+        assert_eq!(find("OANDA:XAU_USD").unit.as_deref(), Some("/oz"));
+        assert_eq!(find("OANDA:EUR_USD").decimals, Some(4));
+        let err = |t: &str| Config::parse(t).unwrap_err();
+        assert!(err("[[banner]]\n[labels]\n\"A B\" = \"x\"").contains("labels.A B"));
+        assert!(err("[[banner]]\n[labels]\nX = { decimals = 11 }").contains("0 to 10"));
+        assert!(
+            err("[[banner]]\n[labels]\nX = { colour = \"red\" }").contains("unknown key `colour`")
+        );
+        assert!(err("[[banner]]\n[labels]\nX = 5").contains("must be a name"));
     }
 }

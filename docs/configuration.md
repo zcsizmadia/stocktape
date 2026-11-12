@@ -203,6 +203,24 @@ Each line is as tall as its skin, and the banner is as tall as its lines
 together (docking reserves the full height). All lines share the banner's
 placement, so they cross monitors and go around corners together.
 
+### Display names, units and decimals (commodities, FX, rates)
+
+`[labels]` changes how particular symbols are shown, which is handy for
+commodities, currencies and rates whose provider symbols are cryptic:
+
+```toml
+[labels]
+"OANDA:XAU_USD" = { name = "GOLD", unit = "/oz" }      # GOLD 3,412.20/oz
+"OANDA:EUR_USD" = { name = "EUR/USD", decimals = 4 }   # EUR/USD 1.0832 +0.0032
+"SPY" = "S&P 500 ETF"                                  # just a name
+```
+
+- `name` replaces the ticker, `unit` is appended to the price, and
+  `decimals` (0 to 10) fixes the precision of the price and change.
+- Which commodities and currencies you can get depends on your data
+  provider and plan; use the provider's symbol (see `[feed.symbols]`).
+- The settings window edits these under Watchlist → Display names.
+
 ### Headlines and messages
 
 A line can show quotes, news headlines, or both, plus your own messages:
