@@ -53,6 +53,14 @@ jobs:
         run: cargo test --workspace --doc --locked
       - name: Docs
         run: cargo doc --workspace --no-deps --locked
+      - name: Smoke test the binary
+        shell: bash
+        run: |
+          cargo run -q --locked -- --version
+          cargo run -q --locked -- --list-layouts
+          cargo run -q --locked -- --list-skins
+          cargo run -q --locked -- --skin glass --preview smoke.png --width 640
+          test -s smoke.png
 
   msrv:
     name: MSRV
