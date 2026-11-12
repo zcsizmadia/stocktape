@@ -46,7 +46,7 @@ impl std::fmt::Debug for Ticker {
 
 impl Ticker {
     /// Creates a ticker with the demo mock feed.
-    pub fn demo(seed: u64, speed: f64, scale: f32, clock: &dyn Clock) -> Self {
+    pub fn demo(seed: u64, speed: f64, scale: f32, style: BannerStyle, clock: &dyn Clock) -> Self {
         let feed = MockFeed::demo(seed);
         let order = feed.symbols().cloned().collect();
         let config = BeltConfig {
@@ -61,7 +61,7 @@ impl Ticker {
             order,
             next: 0,
             belt: Belt::new(config, clock.monotonic()),
-            renderer: SegmentRenderer::new(BannerStyle::default()),
+            renderer: SegmentRenderer::new(style),
             images: HashMap::new(),
             next_id: 0,
             last_feed: None,
@@ -85,6 +85,14 @@ impl Ticker {
             self.scale = scale;
             self.belt.set_snap(Snap::Pixels(f64::from(scale)));
         }
+    }
+
+    /// Switches to a new style. The belt restarts so every quote on screen
+    /// uses the new look; the banner height may change.
+    pub fn set_style(&mut self, style: BannerStyle) {
+        self.renderer.set_style(style);
+        self.belt.clear();
+        self.images.clear();
     }
 
     /// Pulls new prices from the feed when they are due.
@@ -131,7 +139,8 @@ impl Ticker {
                 let symbol = &order[*next % order.len()];
                 *next = (*next + 1) % order.len();
                 if let Some(entry) = store.get(symbol) {
-                    let segment = QuoteSegment::from_quote(entry.quote());
+                    let segment = QuoteSegment::from_quote(entry.quote())
+                        .with_history(entry.history().map(|(_, price)| price));
                     let image = renderer.draw(&segment, scale);
                     let width = image.logical_width;
                     let id = *next_id;
@@ -167,10 +176,61 @@ impl Ticker {
     }
 }
 
+/// A fixed point in time for previews and tests (2026-11-12 15:30 UTC).
+const PREVIEW_EPOCH: i64 = 1_794_583_800;
+
+/// Renders a demo frame of `skin`, `width` pixels wide, as it looks after the
+/// belt has filled. Always the same image for the same skin and width.
+pub fn preview_frame(skin: &stocktape_skin::Skin, width: u32) -> Pixmap {
+    let clock = stocktape_core::ManualClock::new(
+        stocktape_core::Timestamp::from_second(PREVIEW_EPOCH).expect("valid preview time"),
+    );
+    let mut ticker = Ticker::demo(7, 240.0, 1.0, BannerStyle::from(skin), &clock);
+    // Run long enough for the sparklines to have history and the belt to fill.
+    for _ in 0..(60 * 40) {
+        clock.advance(Duration::from_millis(16));
+        ticker.frame(&clock, width);
+    }
+    ticker.frame(&clock, width).clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use stocktape_core::{ManualClock, Timestamp};
+
+    impl Ticker {
+        fn test(seed: u64, speed: f64, scale: f32, clock: &dyn Clock) -> Self {
+            Self::demo(seed, speed, scale, BannerStyle::default(), clock)
+        }
+    }
+
+    #[test]
+    fn set_style_restarts_with_new_height() {
+        let clock = clock();
+        let mut ticker = Ticker::test(1, 400.0, 1.0, &clock);
+        for _ in 0..120 {
+            clock.advance(Duration::from_millis(16));
+            ticker.frame(&clock, 400);
+        }
+        let terminal = stocktape_skin::SkinLibrary::builtin()
+            .resolve("terminal")
+            .unwrap();
+        ticker.set_style(BannerStyle::from(&terminal));
+        assert_eq!(ticker.images.len(), 0);
+        assert_eq!(ticker.frame(&clock, 400).height(), 44);
+    }
+
+    #[test]
+    fn previews_are_repeatable() {
+        let skin = stocktape_skin::SkinLibrary::builtin()
+            .resolve("glass")
+            .unwrap();
+        let a = preview_frame(&skin, 300);
+        let b = preview_frame(&skin, 300);
+        assert_eq!(a.data(), b.data());
+        assert_eq!(a.height(), 60);
+    }
 
     fn clock() -> ManualClock {
         // 2026-11-12 15:30:00 UTC, a fixed time so tests are repeatable.
@@ -180,17 +240,17 @@ mod tests {
     #[test]
     fn frame_has_requested_size() {
         let clock = clock();
-        let mut ticker = Ticker::demo(1, 120.0, 1.0, &clock);
+        let mut ticker = Ticker::test(1, 120.0, 1.0, &clock);
         let frame = ticker.frame(&clock, 800);
         assert_eq!((frame.width(), frame.height()), (800, 56));
-        let mut hidpi = Ticker::demo(1, 120.0, 2.0, &clock);
+        let mut hidpi = Ticker::test(1, 120.0, 2.0, &clock);
         assert_eq!(hidpi.frame(&clock, 800).height(), 112);
     }
 
     #[test]
     fn content_scrolls_in_and_fills_the_banner() {
         let clock = clock();
-        let mut ticker = Ticker::demo(1, 400.0, 1.0, &clock);
+        let mut ticker = Ticker::test(1, 400.0, 1.0, &clock);
         let background = [0x0E, 0x1A, 0x2F, 0xFF];
         let first = ticker.frame(&clock, 800).clone();
         assert!(
@@ -217,7 +277,7 @@ mod tests {
     #[test]
     fn images_are_released_after_scrolling_out() {
         let clock = clock();
-        let mut ticker = Ticker::demo(1, 2_000.0, 1.0, &clock);
+        let mut ticker = Ticker::test(1, 2_000.0, 1.0, &clock);
         for _ in 0..600 {
             clock.advance(Duration::from_millis(16));
             ticker.frame(&clock, 400);
@@ -229,7 +289,7 @@ mod tests {
     fn same_clock_same_frame() {
         let run = || {
             let clock = clock();
-            let mut ticker = Ticker::demo(9, 150.0, 1.0, &clock);
+            let mut ticker = Ticker::test(9, 150.0, 1.0, &clock);
             for _ in 0..300 {
                 clock.advance(Duration::from_millis(16));
                 ticker.frame(&clock, 640);

@@ -1,8 +1,6 @@
-//! Visual style of a banner.
-//!
-//! This is the renderer's resolved view of a skin. The skin crate (#5) will
-//! load TOML skins and produce one of these; until then [`BannerStyle::default`]
-//! is the Classic Dark look from the mockups.
+//! Visual style of a banner: the renderer's view of a resolved skin.
+
+use stocktape_skin::{Color, Skin, SkinLibrary, TextSpec};
 
 /// A straight (not premultiplied) RGBA color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,15 +34,67 @@ impl Rgba {
     }
 }
 
+impl From<Color> for Rgba {
+    fn from(c: Color) -> Self {
+        Self {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+            a: c.a,
+        }
+    }
+}
+
 /// Font, size and color for one text element.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextStyle {
+    /// Font family; the bundled ones are `Inter` and `JetBrains Mono`.
+    pub family: String,
     /// Font size in logical pixels.
     pub size: f32,
-    /// CSS-style weight: 400 regular, 700 bold, 800 extra bold.
+    /// Weight: 400 regular, 700 bold, 800 extra bold.
     pub weight: u16,
     /// Text color.
     pub color: Rgba,
+}
+
+impl From<&TextSpec> for TextStyle {
+    fn from(t: &TextSpec) -> Self {
+        Self {
+            family: t.family.clone(),
+            size: t.size,
+            weight: t.weight,
+            color: t.color.into(),
+        }
+    }
+}
+
+/// Pill behind the percent change: `(background, text)` per direction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BadgeStyle {
+    /// Colors for rising prices.
+    pub up: (Rgba, Rgba),
+    /// Colors for falling prices.
+    pub down: (Rgba, Rgba),
+    /// Colors for unchanged prices.
+    pub flat: (Rgba, Rgba),
+    /// Corner radius; clamped to half the pill height.
+    pub radius: f32,
+    /// Horizontal padding.
+    pub padding_x: f32,
+    /// Vertical padding.
+    pub padding_y: f32,
+}
+
+/// Intraday price line after the price.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SparklineStyle {
+    /// Width in logical pixels.
+    pub width: f32,
+    /// Height in logical pixels.
+    pub height: f32,
+    /// Line thickness in logical pixels.
+    pub stroke: f32,
 }
 
 /// Everything the renderer needs to draw quote segments.
@@ -52,7 +102,7 @@ pub struct TextStyle {
 pub struct BannerStyle {
     /// Banner thickness in logical pixels.
     pub height: f32,
-    /// Background behind the segments.
+    /// Background behind the segments; may be translucent.
     pub background: Rgba,
     /// Space before the first and after the last element of a segment.
     pub padding: f32,
@@ -64,10 +114,12 @@ pub struct BannerStyle {
     pub symbol: TextStyle,
     /// The price.
     pub price: TextStyle,
-    /// The absolute change; its color comes from `up`/`down`/`flat`.
-    pub change: TextStyle,
-    /// The percent change; its color comes from `up`/`down`/`flat`.
-    pub percent: TextStyle,
+    /// The absolute change, if shown; colored by direction.
+    pub change: Option<TextStyle>,
+    /// Whether an arrow precedes the change.
+    pub arrow: bool,
+    /// The percent change, if shown; colored by direction (or the badge).
+    pub percent: Option<TextStyle>,
     /// Color for rising prices.
     pub up: Rgba,
     /// Color for falling prices.
@@ -78,42 +130,53 @@ pub struct BannerStyle {
     pub separator: Rgba,
     /// Divider width in logical pixels; zero for none.
     pub separator_width: f32,
+    /// Pill behind the percent change.
+    pub badge: Option<BadgeStyle>,
+    /// Intraday price line.
+    pub sparkline: Option<SparklineStyle>,
+}
+
+impl From<&Skin> for BannerStyle {
+    fn from(s: &Skin) -> Self {
+        Self {
+            height: s.height,
+            background: s.background.into(),
+            padding: s.padding,
+            spacing: s.spacing,
+            baseline: s.baseline,
+            symbol: (&s.symbol).into(),
+            price: (&s.price).into(),
+            change: s.change.as_ref().map(Into::into),
+            arrow: s.arrow,
+            percent: s.percent.as_ref().map(Into::into),
+            up: s.up.into(),
+            down: s.down.into(),
+            flat: s.flat.into(),
+            separator: s.separator.into(),
+            separator_width: s.separator_width,
+            badge: s.badge.as_ref().map(|b| BadgeStyle {
+                up: (b.up.0.into(), b.up.1.into()),
+                down: (b.down.0.into(), b.down.1.into()),
+                flat: (b.flat.0.into(), b.flat.1.into()),
+                radius: b.radius,
+                padding_x: b.padding_x,
+                padding_y: b.padding_y,
+            }),
+            sparkline: s.sparkline.as_ref().map(|p| SparklineStyle {
+                width: p.width,
+                height: p.height,
+                stroke: p.stroke,
+            }),
+        }
+    }
 }
 
 impl Default for BannerStyle {
-    /// Classic Dark.
+    /// The built-in default skin (Classic Dark).
     fn default() -> Self {
-        Self {
-            height: 56.0,
-            background: Rgba::hex(0x0E1A2F),
-            padding: 22.0,
-            spacing: 10.0,
-            baseline: 0.64,
-            symbol: TextStyle {
-                size: 24.0,
-                weight: 800,
-                color: Rgba::hex(0xFFFFFF),
-            },
-            price: TextStyle {
-                size: 24.0,
-                weight: 400,
-                color: Rgba::hex(0xDCE3EE),
-            },
-            change: TextStyle {
-                size: 19.0,
-                weight: 700,
-                color: Rgba::hex(0x9AA4B5),
-            },
-            percent: TextStyle {
-                size: 15.0,
-                weight: 700,
-                color: Rgba::hex(0x9AA4B5),
-            },
-            up: Rgba::hex(0x34D399),
-            down: Rgba::hex(0xF87171),
-            flat: Rgba::hex(0x9AA4B5),
-            separator: Rgba::hex(0xFFFFFF).with_alpha(20),
-            separator_width: 1.0,
-        }
+        let skin = SkinLibrary::builtin()
+            .resolve(SkinLibrary::DEFAULT)
+            .expect("the built-in default skin is valid");
+        Self::from(&skin)
     }
 }

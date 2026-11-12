@@ -1,0 +1,42 @@
+schema = 1
+name = "Terminal"
+description = "Monospaced phosphor amber on black."
+extends = "classic-dark"
+
+[tokens]
+black = "#050505"
+amber = "#FFB000"
+amber2 = "#FFD480"
+green = "#7CFC9A"
+red = "#FF7A6B"
+gray = "#FFB000"
+
+[banner]
+height = 44
+background = "$black"
+padding = 14
+spacing = 10
+baseline = 0.66
+
+[text]
+family = "JetBrains Mono"
+size = 17
+color = "$amber"
+
+[symbol]
+weight = 700
+
+[price]
+color = "$amber2"
+
+[change]
+arrow = false
+size = 15
+weight = 400
+
+[percent]
+size = 15
+weight = 400
+
+[separator]
+width = 0

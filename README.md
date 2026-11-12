@@ -18,7 +18,8 @@ which quotes appear and when.
 - **Customizable layouts:** placement, size, tiers, pinned boxes, speed,
   direction, docked or click-through overlay, presets.
 - **Skins:** declarative TOML files with design tokens and inheritance, hot
-  reloaded. Built-in styles: Classic Dark, Daylight, Terminal and Glass.
+  reloaded. Built-in styles: Classic Dark, Daylight, Terminal and Glass. See
+  [docs/skins.md](docs/skins.md).
 - **Strategies:** round-robin watchlists, movers weighting, event highlights,
   time-of-day schedules and frequency caps, composable.
 - **Multiple feeds:** several market-data providers at once, with failover,
