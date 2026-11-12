@@ -51,7 +51,7 @@ The workspace is split into small crates under `crates/`: `core`, `sources`,
 ## Market data
 
 stocktape does not ship or redistribute market data. You bring your own API
-key for a supported provider (currently Finnhub; see
+key for a supported provider (currently Finnhub and Massive; see
 [docs/configuration.md](docs/configuration.md)). Check each provider's terms, especially for
 real-time exchange data.
 

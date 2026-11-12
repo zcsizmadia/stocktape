@@ -84,6 +84,21 @@ symbols = ["AAPL", "MSFT", "NVDA"]
 - Prices come from Finnhub snapshots (previous close, for the change) and its
   live trade stream. Free accounts allow 60 requests a minute and 50 streamed
   symbols, and some exchanges are delayed or paid; check Finnhub's terms.
+- **Massive** (massive.com, formerly Polygon.io) is the second provider:
+
+  ```toml
+  [[feed]]
+  provider = "massive"           # key from MASSIVE_API_KEY (or api_key_env)
+  refresh = 60                   # default 60
+  requests_per_minute = 5        # your plan's limit; free plan: 5
+  ```
+
+  It batches the whole watchlist into one snapshot request and paces every
+  request to `requests_per_minute`. Snapshots need Stocks Starter or higher
+  (15-minute delayed on Starter and Developer, real-time on Advanced). On the
+  free Basic plan, stocktape notices that and shows end-of-day prices (the
+  previous day's close), one symbol per request. US stocks only for now.
+  A typical setup is Finnhub first (live) and Massive second as the backup.
 - **Several feeds:** list more `[[feed]]` tables. The first is the primary;
   a later feed takes over a symbol only when the ones before it have been
   quiet for that symbol for 30 s, and hands it back when they recover.

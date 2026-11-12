@@ -14,7 +14,7 @@ use stocktape_render::frame::compose;
 use stocktape_render::{BannerStyle, QuoteSegment, SegmentImage, SegmentRenderer};
 use stocktape_sources::failover::Arbiter;
 use stocktape_sources::mock::MockFeed;
-use stocktape_sources::{FeedEvent, FeedHandle, Update, finnhub};
+use stocktape_sources::{FeedEvent, FeedHandle, Update, finnhub, massive};
 use stocktape_strategies::{
     Caps, Context, Group, HighlightRules, Highlights, Item, Mix, Movers, Strategy, Watchlist,
 };
@@ -86,30 +86,49 @@ impl Market {
         let handles = live
             .iter()
             .enumerate()
-            .map(|(index, feed)| match feed.provider {
-                Provider::Finnhub => {
-                    let names = symbols
+            .map(|(index, feed)| {
+                // Provider names: the config's overrides, else each
+                // provider's default mapping.
+                let names = |default: &dyn Fn(&Symbol) -> String| -> Vec<(Symbol, String)> {
+                    symbols
                         .iter()
                         .map(|s| {
                             let name = feed
                                 .names
                                 .iter()
                                 .find(|(sym, _)| sym == s)
-                                .map_or_else(|| finnhub::default_name(s), |(_, n)| n.clone());
+                                .map_or_else(|| default(s), |(_, n)| n.clone());
                             (s.clone(), name)
                         })
-                        .collect();
-                    finnhub::spawn(
-                        finnhub::FinnhubConfig {
-                            snapshot_every: feed.refresh,
-                            stream: feed.stream,
-                            ..finnhub::FinnhubConfig::new(feed.api_key.clone(), names)
+                        .collect()
+                };
+                match feed.provider {
+                    Provider::Finnhub => {
+                        let names = names(&finnhub::default_name);
+                        finnhub::spawn(
+                            finnhub::FinnhubConfig {
+                                snapshot_every: feed.refresh,
+                                stream: feed.stream,
+                                ..finnhub::FinnhubConfig::new(feed.api_key.clone(), names)
+                            },
+                            index,
+                            tx.clone(),
+                        )
+                    }
+                    Provider::Massive => massive::spawn(
+                        massive::MassiveConfig {
+                            refresh: feed.refresh,
+                            requests_per_minute: feed.requests_per_minute,
+                            ..massive::MassiveConfig::new(
+                                feed.api_key.clone(),
+                                names(&|s: &Symbol| s.ticker().to_owned()),
+                            )
                         },
                         index,
                         tx.clone(),
-                    )
+                    ),
+                    Provider::Mock => unreachable!("mock feeds are filtered out"),
                 }
-                Provider::Mock => unreachable!("mock feeds are filtered out"),
             })
             .collect();
         Self {

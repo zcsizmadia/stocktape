@@ -3,6 +3,9 @@
 //! - [`mock`]: deterministic sample prices for demos and tests.
 //! - [`finnhub`]: real quotes from Finnhub (REST snapshots plus a WebSocket
 //!   trade stream), on a background thread.
+//! - [`massive`]: Massive (formerly Polygon.io), batched and rate-limited
+//!   REST snapshots.
+//! - [`limiter`]: request pacing for rate-limited APIs.
 //! - [`failover`]: decides which of several feeds a symbol's quotes come from.
 //!
 //! Live feeds run on their own threads and send [`FeedEvent`]s over a
@@ -15,6 +18,8 @@
 
 pub mod failover;
 pub mod finnhub;
+pub mod limiter;
+pub mod massive;
 pub mod mock;
 
 use std::sync::Arc;
