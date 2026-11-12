@@ -38,6 +38,9 @@ pub struct FinnhubConfig {
     pub ws_url: String,
     /// How often to refresh REST snapshots.
     pub snapshot_every: Duration,
+    /// Stream live trades over the WebSocket. Without it, prices update
+    /// only from snapshots, every `snapshot_every`.
+    pub stream: bool,
 }
 
 impl FinnhubConfig {
@@ -50,6 +53,7 @@ impl FinnhubConfig {
             rest_url: "https://finnhub.io/api/v1".to_owned(),
             ws_url: "wss://ws.finnhub.io".to_owned(),
             snapshot_every: Duration::from_secs(300),
+            stream: true,
         }
     }
 }
@@ -414,6 +418,20 @@ impl Worker {
                 false,
                 "no API key; set it in the configuration or environment",
             );
+            return;
+        }
+        if !self.config.stream {
+            // Polling only: a full round of snapshots every `snapshot_every`.
+            self.status(
+                true,
+                &format!(
+                    "polling every {} s (no live stream)",
+                    self.config.snapshot_every.as_secs()
+                ),
+            );
+            while !self.stopped() && self.snapshots() {
+                self.sleep(self.config.snapshot_every);
+            }
             return;
         }
         let mut backoff = Duration::from_secs(1);

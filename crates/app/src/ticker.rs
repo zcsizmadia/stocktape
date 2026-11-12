@@ -100,7 +100,11 @@ impl Market {
                         })
                         .collect();
                     finnhub::spawn(
-                        finnhub::FinnhubConfig::new(feed.api_key.clone(), names),
+                        finnhub::FinnhubConfig {
+                            snapshot_every: feed.refresh,
+                            stream: feed.stream,
+                            ..finnhub::FinnhubConfig::new(feed.api_key.clone(), names)
+                        },
                         index,
                         tx.clone(),
                     )
