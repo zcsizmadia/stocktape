@@ -11,6 +11,7 @@
 //! offset = 0              # distance from the screen edge
 //! inset = [0, 0]          # space left free at the start and end of the edge
 //! reverse = false         # flow the other way
+//! dock = true             # reserve screen space (edges only, where supported)
 //! strategy = "demo"       # demo | watchlist | movers
 //! ```
 //!
@@ -46,6 +47,9 @@ pub struct BannerConfig {
     pub speed: f64,
     /// What it shows.
     pub strategy: StrategyKind,
+    /// Reserve screen space so other windows stay clear (edge placements;
+    /// where the platform supports it).
+    pub dock: bool,
 }
 
 /// The whole configuration.
@@ -287,6 +291,12 @@ fn banner(t: &Table) -> Result<BannerConfig, String> {
         }
         Some(_) => return Err("`inset` must be [start, end]".to_owned()),
     };
+    let dock = match t.get("dock") {
+        None => true,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| "`dock` must be true or false".to_owned())?,
+    };
     let reverse = match t.get("reverse") {
         None => false,
         Some(v) => v
@@ -315,6 +325,7 @@ fn banner(t: &Table) -> Result<BannerConfig, String> {
         skin: string(t, "skin", stocktape_skin::SkinLibrary::DEFAULT)?.to_owned(),
         speed: number(t, "speed", 120.0, 0.0, 5_000.0)?,
         strategy,
+        dock,
     })
 }
 

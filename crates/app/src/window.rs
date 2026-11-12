@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use stocktape_core::SystemClock;
-use stocktape_layout::{BannerLayout, Display, Rect, Segment, plan};
+use stocktape_layout::{BannerLayout, Display, Edge, Placement, Rect, Segment, plan};
 use stocktape_render::BannerStyle;
 use stocktape_render::frame::present_strip;
 use stocktape_skin::SkinLibrary;
@@ -66,6 +66,9 @@ impl SkinWatch {
 
 /// One window showing one segment of one banner.
 struct SegmentWindow {
+    // Declared first so the reserved space is released before the window
+    // goes away.
+    _docked: Option<stocktape_platform::Docked>,
     banner: usize,
     segment: Segment,
     window: Rc<Window>,
@@ -127,7 +130,9 @@ fn create_window(
     banner: usize,
     name: &str,
     segment: &Segment,
+    dock: Option<Edge>,
 ) -> Result<SegmentWindow, Box<dyn Error>> {
+    let mut segment = segment.clone();
     let r = segment.rect;
     #[allow(unused_mut)]
     let mut attributes = Window::default_attributes()
@@ -144,11 +149,28 @@ fn create_window(
         attributes = attributes.with_skip_taskbar(true);
     }
     let window = Rc::new(event_loop.create_window(attributes)?);
+    let docked = dock.and_then(|edge| match stocktape_platform::dock(&*window, edge, r) {
+        Ok(docked) => {
+            if docked.rect != r {
+                // The desktop moved the strip, e.g. above the taskbar.
+                let d = docked.rect;
+                window.set_outer_position(PhysicalPosition::new(d.x, d.y));
+                let _ = window.request_inner_size(PhysicalSize::new(d.width, d.height));
+                segment.rect = d;
+            }
+            Some(docked)
+        }
+        Err(e) => {
+            eprintln!("banner `{name}` floats on top instead: {e}");
+            None
+        }
+    });
     let context = softbuffer::Context::new(window.clone())?;
     let surface = softbuffer::Surface::new(&context, window.clone())?;
     Ok(SegmentWindow {
+        _docked: docked,
         banner,
-        segment: segment.clone(),
+        segment,
         window,
         surface,
         strip: None,
@@ -168,12 +190,17 @@ impl App {
                 Ok(layout) => {
                     let scale = layout.segments.iter().map(|s| s.scale).fold(1.0, f64::max);
                     banner.runtime.set_measure_scale(scale);
+                    let dock = match &banner.config.placement {
+                        Placement::Edge { edge, .. } if banner.config.dock => Some(*edge),
+                        _ => None,
+                    };
                     for segment in &layout.segments {
                         self.windows.push(create_window(
                             event_loop,
                             index,
                             &banner.config.name,
                             segment,
+                            dock,
                         )?);
                     }
                     banner.layout = Some(layout);
