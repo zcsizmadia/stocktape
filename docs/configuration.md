@@ -4,6 +4,32 @@ stocktape shows one or more **banners**. Each banner is one continuous belt of
 quotes that can run along an edge of a display, span several displays, or go
 all the way around. Every banner has its own skin, speed and strategy.
 
+## The settings window
+
+```sh
+stocktape --settings
+```
+
+opens a window to edit everything on this page without writing TOML: banners
+and their lines (skin, speed, what they show), where they go and on which
+displays, feeds, the watchlist, and skins with a live preview.
+
+- It edits the standard configuration file: `%APPDATA%stocktapestocktape.toml`
+  on Windows, `~/.config/stocktape/stocktape.toml` on Linux,
+  `~/Library/Application Support/stocktape/stocktape.toml` on macOS (or the
+  file given with `--config`). A new file starts from `--layout` (default
+  `bottom`).
+- **Save** writes the file and keeps the previous one as `stocktape.toml.bak`.
+  Comments in a hand-written file are not kept.
+- **Running banners update by themselves** when the file changes, whether
+  saved from the window or edited by hand. A file with a mistake is reported
+  and the running banners stay as they were.
+- API keys are never shown or written; each feed names the environment
+  variable that holds its key, and shows whether it is set.
+
+Without `--config` or `--layout`, `stocktape` uses the standard file if it
+exists.
+
 ## Quick start: presets
 
 ```sh

@@ -26,8 +26,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
-use crate::config::{BannerConfig, Config};
 use crate::ticker::{BannerRuntime, LineSpec, Market, demo_groups};
+use stocktape_config::{BannerConfig, Config};
 
 /// Frame interval when no display reports its refresh rate.
 const DEFAULT_FRAME: Duration = Duration::from_micros(16_667);
@@ -37,6 +37,8 @@ const DISPLAY_SCAN: Duration = Duration::from_secs(2);
 /// Watches a skins folder and reports when anything in it changes.
 struct SkinWatch {
     dir: PathBuf,
+    /// Only changes to this file count (for the configuration file).
+    file: Option<std::ffi::OsString>,
     events: Receiver<notify::Result<notify::Event>>,
     // Dropping the watcher stops the notifications.
     _watcher: RecommendedWatcher,
@@ -49,16 +51,36 @@ impl SkinWatch {
         watcher.watch(&dir, RecursiveMode::NonRecursive)?;
         Ok(Self {
             dir,
+            file: None,
             events,
             _watcher: watcher,
         })
+    }
+
+    /// Watches one file (through its folder, since editors often replace
+    /// files rather than write them in place).
+    fn file(path: &std::path::Path) -> Result<Self, Box<dyn Error>> {
+        let dir = path
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let mut watch = Self::new(dir.to_path_buf())?;
+        watch.file = path.file_name().map(std::ffi::OsStr::to_os_string);
+        Ok(watch)
     }
 
     /// Whether any change arrived since the last call.
     fn changed(&self) -> bool {
         let mut changed = false;
         while let Ok(event) = self.events.try_recv() {
-            changed |= event.is_ok_and(|e| !e.kind.is_access());
+            changed |= event.is_ok_and(|e| {
+                !e.kind.is_access()
+                    && self.file.as_ref().is_none_or(|name| {
+                        e.paths
+                            .iter()
+                            .any(|p| p.file_name() == Some(name.as_os_str()))
+                    })
+            });
         }
         changed
     }
@@ -86,7 +108,10 @@ struct App {
     clock: SystemClock,
     market: Market,
     banners: Vec<Banner>,
+    library: SkinLibrary,
     watch: Option<SkinWatch>,
+    config_watch: Option<ConfigWatch>,
+    seed: u64,
     windows: Vec<SegmentWindow>,
     displays: Vec<Display>,
     last_scan: Option<Instant>,
@@ -264,9 +289,51 @@ impl App {
         for (banner, s) in self.banners.iter_mut().zip(styles) {
             banner.runtime.set_styles(s);
         }
+        self.library = library;
         eprintln!("reloaded skins");
         // Thickness may have changed.
         self.check_displays(event_loop, true)
+    }
+
+    /// Re-reads the configuration file and rebuilds banners and feeds. On
+    /// error the current setup stays and the problem is printed.
+    fn reload_config(&mut self, event_loop: &ActiveEventLoop) -> Result<(), Box<dyn Error>> {
+        let Some(cw) = &self.config_watch else {
+            return Ok(());
+        };
+        if !cw.watch.changed() {
+            return Ok(());
+        }
+        let loaded = std::fs::read_to_string(&cw.path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| Config::parse(&text))
+            .map(|mut config| {
+                if let Some(skin) = &cw.skin_override {
+                    for line in config.banners.iter_mut().flat_map(|b| &mut b.lines) {
+                        line.skin.clone_from(skin);
+                    }
+                }
+                config
+            })
+            .and_then(|config| config.check_keys().map(|()| config))
+            .and_then(|config| {
+                build_banners(&config, &self.library, self.seed, &self.clock)
+                    .map(|banners| (config, banners))
+                    .map_err(|e| e.to_string())
+            });
+        match loaded {
+            Ok((config, banners)) => {
+                let groups = config.watchlist.clone().unwrap_or_else(demo_groups);
+                self.market = Market::from_config(&config.feeds, &groups, self.seed);
+                self.banners = banners;
+                eprintln!("reloaded {}", cw.path.display());
+                self.check_displays(event_loop, true)
+            }
+            Err(e) => {
+                eprintln!("configuration not reloaded: {e}");
+                Ok(())
+            }
+        }
     }
 
     fn draw(&mut self, id: WindowId) -> Result<(), Box<dyn Error>> {
@@ -340,6 +407,7 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(e) = self
             .reload_skins(event_loop)
+            .and_then(|()| self.reload_config(event_loop))
             .and_then(|()| self.check_displays(event_loop, false))
         {
             self.fail(event_loop, e);
@@ -384,43 +452,32 @@ pub fn run(
     config: Config,
     library: SkinLibrary,
     skins_dir: Option<PathBuf>,
+    reload: Option<(PathBuf, Option<String>)>,
 ) -> Result<(), Box<dyn Error>> {
     let clock = SystemClock::new();
     let seed = seed();
     let groups = config.watchlist.clone().unwrap_or_else(demo_groups);
-    let config_feeds = config.feeds.clone();
     // Fail before opening any window if a skin is broken.
-    let banners = config
-        .banners
-        .into_iter()
-        .enumerate()
-        .map(|(i, config)| {
-            let specs: Vec<LineSpec> = config
-                .lines
-                .iter()
-                .zip(line_styles(&library, &config)?)
-                .map(|(line, style)| LineSpec {
-                    strategy: line.strategy,
-                    speed: line.speed,
-                    style,
-                })
-                .collect();
-            let runtime = BannerRuntime::new(&specs, &groups, seed + i as u64, &clock);
-            Ok(Banner {
-                config,
-                runtime,
-                layout: None,
+    let banners = build_banners(&config, &library, seed, &clock)?;
+    let watch = skins_dir.map(SkinWatch::new).transpose()?;
+    let config_watch = reload
+        .map(|(path, skin_override)| {
+            SkinWatch::file(&path).map(|watch| ConfigWatch {
+                path,
+                skin_override,
+                watch,
             })
         })
-        .collect::<Result<Vec<_>, stocktape_skin::SkinError>>()?;
-    let watch = skins_dir.map(SkinWatch::new).transpose()?;
+        .transpose()?;
     let event_loop = EventLoop::new()?;
     let mut app = App {
         clock,
-        market: Market::from_config(&config_feeds, &groups, seed),
+        market: Market::from_config(&config.feeds, &groups, seed),
         banners,
-
+        library,
         watch,
+        config_watch,
+        seed,
         windows: Vec::new(),
         displays: Vec::new(),
         last_scan: None,
@@ -430,6 +487,48 @@ pub fn run(
     };
     event_loop.run_app(&mut app)?;
     app.error.map_or(Ok(()), Err)
+}
+
+/// Watches the configuration file for live reload.
+struct ConfigWatch {
+    path: PathBuf,
+    /// `--skin`, re-applied after each reload.
+    skin_override: Option<String>,
+    watch: SkinWatch,
+}
+
+/// Builds every configured banner; fails if a skin can't be resolved.
+fn build_banners(
+    config: &Config,
+    library: &SkinLibrary,
+    seed: u64,
+    clock: &dyn stocktape_core::Clock,
+) -> Result<Vec<Banner>, stocktape_skin::SkinError> {
+    let groups = config.watchlist.clone().unwrap_or_else(demo_groups);
+    config
+        .banners
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, config)| {
+            let specs: Vec<LineSpec> = config
+                .lines
+                .iter()
+                .zip(line_styles(library, &config)?)
+                .map(|(line, style)| LineSpec {
+                    strategy: line.strategy,
+                    speed: line.speed,
+                    style,
+                })
+                .collect();
+            let runtime = BannerRuntime::new(&specs, &groups, seed + i as u64, clock);
+            Ok(Banner {
+                config,
+                runtime,
+                layout: None,
+            })
+        })
+        .collect()
 }
 
 /// Prints the displays as stocktape sees them, for choosing `displays` in the

@@ -25,7 +25,8 @@ which quotes appear and when.
 - **Multiple feeds:** several market-data providers at once, with failover,
   including non-US exchanges with local trading hours and currencies.
 - **Cross-platform:** Windows, Linux (X11 and Wayland) and macOS.
-- **Native:** pure Rust, no web UI. The settings window uses egui.
+- **Native:** pure Rust, no web UI. The settings window (`--settings`) uses
+  egui; saved changes apply to running banners immediately.
 - **Testable:** deterministic clock, mock and replay feeds, headless
   golden-image rendering tests.
 
@@ -40,6 +41,7 @@ cargo clippy --workspace --all-targets
 cargo run -- --help
 cargo run --release             # demo banner with sample (not real) prices; Esc quits
 cargo run --release -- --layout around     # see --list-layouts and docs/configuration.md
+cargo run --release -- --settings         # settings window; saved changes apply live
 ```
 
 No GPU is required: banners are drawn and composed on the CPU.

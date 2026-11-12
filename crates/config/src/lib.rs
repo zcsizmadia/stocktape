@@ -76,6 +76,9 @@ pub struct Config {
     pub watchlist: Option<Vec<Group>>,
 }
 
+mod save;
+pub use save::{default_path, selector_from_text, selector_to_text};
+
 const PRESETS: &[(&str, &str, &str)] = &[
     (
         "bottom",
@@ -155,6 +158,27 @@ pub fn presets() -> impl Iterator<Item = (&'static str, &'static str)> {
 }
 
 impl Config {
+    /// Checks that every live feed has an API key, naming where to put the
+    /// first one that doesn't.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message for the first feed without a key.
+    pub fn check_keys(&self) -> Result<(), String> {
+        for (i, feed) in self.feeds.iter().enumerate() {
+            if feed.provider != Provider::Mock && feed.api_key.is_empty() {
+                let hint = match &feed.key_source {
+                    KeySource::Env(var) => {
+                        format!("set the {var} environment variable (or `api_key`)")
+                    }
+                    KeySource::Inline => "`api_key` is empty".to_owned(),
+                };
+                return Err(format!("feed {}: no API key: {hint}", i + 1));
+            }
+        }
+        Ok(())
+    }
+
     /// A built-in preset by name.
     ///
     /// # Errors
@@ -210,7 +234,7 @@ impl Config {
 }
 
 const KEYS: &[&str] = &[
-    "name", "place", "displays", "exclude", "skin", "speed", "offset", "inset", "reverse",
+    "name", "place", "displays", "exclude", "dock", "skin", "speed", "offset", "inset", "reverse",
     "strategy", "line",
 ];
 
@@ -484,6 +508,26 @@ mod tests {
     }
 
     #[test]
+    fn dock_can_be_turned_off() {
+        // Regression: `dock` was missing from the allowed keys.
+        let c = Config::parse(
+            "[[banner]]
+dock = false",
+        )
+        .unwrap();
+        assert!(!c.banners[0].dock);
+        assert!(Config::parse("[[banner]]").unwrap().banners[0].dock);
+        assert!(
+            Config::parse(
+                "[[banner]]
+dock = 1"
+            )
+            .unwrap_err()
+            .contains("`dock`")
+        );
+    }
+
+    #[test]
     fn lines_inherit_banner_defaults() {
         let c = Config::parse(
             r#"
@@ -586,7 +630,11 @@ mod tests {
 pub struct FeedConfig {
     /// Which provider.
     pub provider: Provider,
-    /// The API key, read from the file or the environment. Never printed.
+    /// Where the API key comes from.
+    pub key_source: KeySource,
+    /// The API key, read from the file or the environment; empty when not
+    /// found. Never printed, and never written back unless it was in the
+    /// file to begin with.
     pub api_key: String,
     /// Provider names for symbols whose default mapping is wrong.
     pub names: Vec<(Symbol, String)>,
@@ -612,6 +660,15 @@ impl std::fmt::Debug for FeedConfig {
     }
 }
 
+/// Where a feed's API key comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeySource {
+    /// An environment variable, by name (the recommended way).
+    Env(String),
+    /// Written in the configuration file itself.
+    Inline,
+}
+
 /// Supported data providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -621,6 +678,30 @@ pub enum Provider {
     Finnhub,
     /// Massive, formerly Polygon.io (batched REST snapshots).
     Massive,
+}
+
+impl Provider {
+    /// Every provider, for pickers.
+    pub const ALL: [Self; 3] = [Self::Finnhub, Self::Massive, Self::Mock];
+
+    /// The name used in the configuration file.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Mock => "mock",
+            Self::Finnhub => "finnhub",
+            Self::Massive => "massive",
+        }
+    }
+
+    /// The environment variable the key is read from by default.
+    #[must_use]
+    pub fn default_key_env(self) -> &'static str {
+        match self {
+            Self::Massive => "MASSIVE_API_KEY",
+            Self::Finnhub | Self::Mock => "FINNHUB_API_KEY",
+        }
+    }
 }
 
 const FEED_KEYS: &[&str] = &[
@@ -675,22 +756,18 @@ fn feed(t: &Table, env: &dyn Fn(&str) -> Option<String>) -> Result<FeedConfig, S
             ));
         }
     };
-    let api_key = match t.get("api_key") {
-        Some(v) => v
-            .as_str()
-            .ok_or_else(|| "`api_key` must be a string".to_owned())?
-            .to_owned(),
-        None if provider != Provider::Mock => {
-            let default_env = match provider {
-                Provider::Massive => "MASSIVE_API_KEY",
-                _ => "FINNHUB_API_KEY",
-            };
-            let var = string(t, "api_key_env", default_env)?;
-            env(var).filter(|k| !k.trim().is_empty()).ok_or_else(|| {
-                format!("no API key: set the {var} environment variable (or `api_key`)")
-            })?
+    let (key_source, api_key) = match t.get("api_key") {
+        Some(v) => (
+            KeySource::Inline,
+            v.as_str()
+                .ok_or_else(|| "`api_key` must be a string".to_owned())?
+                .to_owned(),
+        ),
+        None => {
+            let var = string(t, "api_key_env", provider.default_key_env())?.to_owned();
+            let key = env(&var).unwrap_or_default();
+            (KeySource::Env(var), key)
         }
-        None => String::new(),
     };
     let names = match t.get("symbols") {
         None => Vec::new(),
@@ -712,6 +789,7 @@ fn feed(t: &Table, env: &dyn Fn(&str) -> Option<String>) -> Result<FeedConfig, S
     };
     Ok(FeedConfig {
         provider,
+        key_source,
         api_key: api_key.trim().to_owned(),
         names,
         refresh: Duration::from_secs_f64(number(
@@ -821,10 +899,19 @@ mod feed_tests {
         )
         .unwrap();
         assert_eq!(custom[0].api_key, "abc");
-        let missing = parse_feeds("[[feed]]\nprovider = \"finnhub\"", &[]).unwrap_err();
+        // A missing key isn't a parse error (the settings window must still
+        // open the file); check_keys reports it before feeds start.
+        let missing = parse_feeds("[[feed]]\nprovider = \"finnhub\"", &[]).unwrap();
+        assert_eq!(missing[0].api_key, "");
+        let config = Config {
+            banners: Vec::new(),
+            feeds: missing,
+            watchlist: None,
+        };
+        let err = config.check_keys().unwrap_err();
         assert!(
-            missing.contains("set the FINNHUB_API_KEY environment variable"),
-            "{missing}"
+            err.contains("set the FINNHUB_API_KEY environment variable"),
+            "{err}"
         );
     }
 

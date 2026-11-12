@@ -20,7 +20,7 @@ use stocktape_strategies::{
 };
 use tiny_skia::Pixmap;
 
-use crate::config::{FeedConfig, Provider, StrategyKind};
+use stocktape_config::{FeedConfig, Provider, StrategyKind};
 
 /// How often the mock feed produces new prices.
 const FEED_INTERVAL: Duration = Duration::from_secs(1);

@@ -1,0 +1,23 @@
+[package]
+name = "stocktape-config"
+description = "The stocktape configuration file: banners, lines, feeds and watchlist."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+stocktape-core.workspace = true
+stocktape-layout.workspace = true
+stocktape-skin.workspace = true
+stocktape-strategies.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

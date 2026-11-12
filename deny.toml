@@ -10,6 +10,12 @@ ignore = [
     # ttf-parser is unmaintained (no known vulnerability). It comes in via
     # cosmic-text -> fontdb; revisit when cosmic-text moves off it.
     { id = "RUSTSEC-2026-0192", reason = "transitive via cosmic-text/fontdb; unmaintained, not vulnerable" },
+    # zvariant, zvariant_derive and zbus_names are unmaintained (no known
+    # vulnerability). They come in via eframe -> accesskit (screen readers on
+    # Linux, AT-SPI); revisit when accesskit moves off them.
+    { id = "RUSTSEC-2026-0370", reason = "transitive via eframe/accesskit; unmaintained, not vulnerable" },
+    { id = "RUSTSEC-2026-0371", reason = "transitive via eframe/accesskit; unmaintained, not vulnerable" },
+    { id = "RUSTSEC-2026-0372", reason = "transitive via eframe/accesskit; unmaintained, not vulnerable" },
 ]
 
 [licenses]
@@ -26,6 +32,8 @@ allow = [
     "OFL-1.1",
     "CC0-1.0",
     "CDLA-Permissive-2.0",
+    "BSL-1.0",
+    "Ubuntu-font-1.0",
 ]
 
 [bans]
