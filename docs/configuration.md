@@ -30,6 +30,10 @@ displays, feeds, the watchlist, and skins with a live preview.
 Without `--config` or `--layout`, `stocktape` uses the standard file if it
 exists.
 
+**Portable mode:** a `stocktape.toml` in the same folder as the `stocktape`
+executable is used instead of the standard file, so a copy on a USB stick keeps
+its settings with it.
+
 ## Quick start: presets
 
 ```sh

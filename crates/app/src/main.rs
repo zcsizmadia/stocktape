@@ -216,7 +216,10 @@ fn main() -> ExitCode {
             Ok(())
         }
         Ok(Command::ListSkins(options)) => list_skins(&options),
-        Ok(Command::Settings(options)) => settings(&options),
+        Ok(Command::Settings(options)) => {
+            stocktape_platform::release_own_console();
+            settings(&options)
+        }
         Ok(Command::ListDisplays) => window::list_displays().map_err(|e| e.to_string()),
         Ok(Command::ListLayouts) => {
             for (name, description) in config::presets() {
@@ -226,6 +229,9 @@ fn main() -> ExitCode {
         }
         Ok(Command::Preview(options)) => preview(&options),
         Ok(Command::Run(options)) => config(&options).and_then(|config| {
+            // No console window behind the banners when not started from a
+            // terminal (Windows).
+            stocktape_platform::release_own_console();
             config.check_keys()?;
             let library = library(&options)?;
             // Edits to the configuration file (by hand or from the settings

@@ -219,6 +219,19 @@ mod windows {
         }
     }
 
+    /// See [`crate::release_own_console`].
+    pub(crate) fn release_own_console() {
+        use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+        let mut ids = [0u32; 4];
+        // SAFETY: the buffer is valid for its full length, which is passed.
+        let attached = unsafe { GetConsoleProcessList(ids.as_mut_ptr(), 4) };
+        // Only this process on the console: Windows created it for us.
+        if attached == 1 {
+            // SAFETY: detaching from our own console has no preconditions.
+            unsafe { FreeConsole() };
+        }
+    }
+
     impl Drop for AppBar {
         fn drop(&mut self) {
             let mut abd = data(
@@ -300,6 +313,16 @@ mod x11 {
         conn.flush().map_err(fail)?;
         Ok(())
     }
+}
+
+/// On Windows, closes the console window that was opened just for
+/// stocktape, i.e. when it was started by double-click, from the Start menu
+/// or at login rather than from a terminal. Started from a terminal, the
+/// terminal is shared and kept, so command-line output works as usual. Does
+/// nothing on other platforms.
+pub fn release_own_console() {
+    #[cfg(windows)]
+    windows::release_own_console();
 }
 
 #[cfg(test)]

@@ -14,9 +14,30 @@ use crate::{
 /// The standard location of the configuration file: `stocktape/stocktape.toml`
 /// in the platform's config folder (`%APPDATA%` on Windows,
 /// `~/.config` on Linux, `~/Library/Application Support` on macOS).
+///
+/// **Portable mode:** a `stocktape.toml` next to the executable wins, so a
+/// copy on a USB stick keeps its settings with it.
 #[must_use]
 pub fn default_path() -> Option<PathBuf> {
-    config_dir(&|name| std::env::var_os(name)).map(|d| d.join("stocktape").join("stocktape.toml"))
+    let exe = std::env::current_exe().ok();
+    choose_path(exe.as_deref(), &|name| std::env::var_os(name), &|p| {
+        p.exists()
+    })
+}
+
+/// The portable file next to `exe` if it exists, else the per-user file.
+fn choose_path(
+    exe: Option<&std::path::Path>,
+    env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    exists: &dyn Fn(&std::path::Path) -> bool,
+) -> Option<PathBuf> {
+    let portable = exe
+        .and_then(std::path::Path::parent)
+        .map(|d| d.join("stocktape.toml"));
+    if let Some(p) = portable.filter(|p| exists(p)) {
+        return Some(p);
+    }
+    config_dir(env).map(|d| d.join("stocktape").join("stocktape.toml"))
 }
 
 /// The platform's per-user configuration folder, from environment variables.
@@ -488,6 +509,21 @@ mod tests {
                 Some(PathBuf::from("/h/.config"))
             );
         }
+    }
+
+    #[test]
+    fn portable_file_wins() {
+        let exe = PathBuf::from("/apps/stocktape/stocktape.exe");
+        let env = |name: &str| {
+            (name == "APPDATA" || name == "HOME" || name == "XDG_CONFIG_HOME")
+                .then(|| std::ffi::OsString::from("/home/me"))
+        };
+        let portable = PathBuf::from("/apps/stocktape/stocktape.toml");
+        let found = choose_path(Some(&exe), &env, &|p| p == portable.as_path());
+        assert_eq!(found, Some(portable.clone()));
+        let fallback = choose_path(Some(&exe), &env, &|_| false).unwrap();
+        assert_ne!(fallback, portable);
+        assert!(fallback.ends_with("stocktape/stocktape.toml"));
     }
 
     #[test]
