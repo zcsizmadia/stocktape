@@ -179,6 +179,16 @@ pub fn parse_ws(text: &str) -> Result<WsMessage, String> {
     })
 }
 
+/// The WebSocket URL with the token. A URL without a path gets `/`, because
+/// `wss://host?token=...` would send the request line `GET ?token=...`,
+/// which servers reject with 400.
+#[must_use]
+pub fn ws_request_url(base: &str, token: &str) -> String {
+    let after_scheme = base.split_once("://").map_or(base, |(_, rest)| rest);
+    let slash = if after_scheme.contains('/') { "" } else { "/" };
+    format!("{base}{slash}?token={token}")
+}
+
 /// The subscribe request for one symbol.
 #[must_use]
 pub fn subscribe_message(name: &str) -> String {
@@ -322,7 +332,7 @@ impl Worker {
     }
 
     fn connect(&self) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, String> {
-        let url = format!("{}?token={}", self.config.ws_url, self.config.api_key);
+        let url = ws_request_url(&self.config.ws_url, &self.config.api_key);
         let (mut ws, _) = tungstenite::connect(url.as_str()).map_err(|e| e.to_string())?;
         let timeout = Some(READ_TIMEOUT);
         let set = match ws.get_mut() {
@@ -494,6 +504,22 @@ mod tests {
         };
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].symbol, "B");
+    }
+
+    #[test]
+    fn websocket_url_always_has_a_path() {
+        assert_eq!(
+            ws_request_url("wss://ws.finnhub.io", "k"),
+            "wss://ws.finnhub.io/?token=k"
+        );
+        assert_eq!(
+            ws_request_url("wss://ws.finnhub.io/", "k"),
+            "wss://ws.finnhub.io/?token=k"
+        );
+        assert_eq!(
+            ws_request_url("ws://localhost:9/feed", "k"),
+            "ws://localhost:9/feed?token=k"
+        );
     }
 
     #[test]
