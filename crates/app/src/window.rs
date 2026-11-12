@@ -99,7 +99,13 @@ struct SegmentWindow {
     window: Rc<Window>,
     surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
     strip: Option<Pixmap>,
+    /// How often this docked window was moved back into place.
+    held: u32,
 }
+
+/// How often a docked window is moved back after the system moves it, before
+/// giving up (so stocktape never fights the window manager in a loop).
+const MAX_HOLDS: u32 = 8;
 
 struct Banner {
     config: BannerConfig,
@@ -177,14 +183,35 @@ fn create_window(
         attributes = attributes.with_skip_taskbar(true);
     }
     let window = Rc::new(event_loop.create_window(attributes)?);
+    let debug = std::env::var_os("STOCKTAPE_DEBUG").is_some();
+    if debug {
+        eprintln!(
+            "[debug] `{name}` window requested {r:?}, created at {:?} size {:?}",
+            window.outer_position().ok(),
+            window.outer_size()
+        );
+    }
     let docked = dock.and_then(|edge| match stocktape_platform::dock(&*window, edge, r) {
         Ok(docked) => {
+            if debug {
+                eprintln!(
+                    "[debug] `{name}` docked {edge:?}: granted {:?}",
+                    docked.rect
+                );
+            }
             if docked.rect != r {
                 // The desktop moved the strip, e.g. above the taskbar.
                 let d = docked.rect;
                 window.set_outer_position(PhysicalPosition::new(d.x, d.y));
                 let _ = window.request_inner_size(PhysicalSize::new(d.width, d.height));
                 segment.rect = d;
+            }
+            if debug {
+                eprintln!(
+                    "[debug] `{name}` after docking at {:?} size {:?}",
+                    window.outer_position().ok(),
+                    window.outer_size()
+                );
             }
             Some(docked)
         }
@@ -202,6 +229,7 @@ fn create_window(
         window,
         surface,
         strip: None,
+        held: 0,
     })
 }
 
@@ -395,6 +423,25 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => event_loop.exit(),
+            WindowEvent::Moved(position) => {
+                // Windows may move a docked banner out of the strip its own
+                // AppBar reserved (seen with top edges right after start).
+                // Put it back, a bounded number of times.
+                if let Some(w) = self.windows.iter_mut().find(|w| w.window.id() == id) {
+                    let r = w.segment.rect;
+                    let moved = position.x != r.x || position.y != r.y;
+                    if std::env::var_os("STOCKTAPE_DEBUG").is_some() {
+                        eprintln!(
+                            "[debug] window for banner {} moved to {position:?} (segment at {r:?})",
+                            w.banner
+                        );
+                    }
+                    if moved && w._docked.is_some() && w.held < MAX_HOLDS {
+                        w.held += 1;
+                        w.window.set_outer_position(PhysicalPosition::new(r.x, r.y));
+                    }
+                }
+            }
             WindowEvent::ScaleFactorChanged { .. } => {
                 // A display's scale changed: lay out again on the next scan.
                 self.last_scan = None;

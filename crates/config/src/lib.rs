@@ -649,7 +649,11 @@ fn news(table: &Table) -> Result<Vec<NewsConfig>, String> {
                 return Err(err(format!("unknown key `{key}`")));
             }
             let url = string(t, "url", "").map_err(err)?.trim().to_owned();
-            if !(url.starts_with("https://") || url.starts_with("http://")) {
+            let host = url
+                .strip_prefix("https://")
+                .or_else(|| url.strip_prefix("http://"))
+                .map(|rest| rest.split(['/', '?', '#', ':']).next().unwrap_or(""));
+            if host.is_none_or(|h| !h.contains('.') && h != "localhost") {
                 return Err(err("needs `url = \"https://...\"`".to_owned()));
             }
             let name = match t.get("name") {
@@ -1327,11 +1331,15 @@ mod news_tests {
         assert!(err("[[banner]]\ncontent = \"video\"").contains("`content` must be"));
         assert!(err("[[banner]]\nmessages = \"x\"").contains("list of strings"));
         assert!(err("[[banner]]\n[[news]]\nurl = \"ftp://x\"").contains("news 1: needs `url"));
+        // Regression: the placeholder from "Add news feed" was accepted.
+        assert!(err("[[banner]]\n[[news]]\nurl = \"https://\"").contains("news 1: needs `url"));
+        assert!(Config::parse("[[banner]]\n[[news]]\nurl = \"http://localhost:8080/rss\"").is_ok());
         assert!(
-            err("[[banner]]\n[[news]]\nurl = \"https://x\"\nrefresh = 5").contains("between 60")
+            err("[[banner]]\n[[news]]\nurl = \"https://x.example\"\nrefresh = 5")
+                .contains("between 60")
         );
         assert!(
-            err("[[banner]]\n[[news]]\nurl = \"https://x\"\nfeed = 1")
+            err("[[banner]]\n[[news]]\nurl = \"https://x.example\"\nfeed = 1")
                 .contains("unknown key `feed`")
         );
     }
