@@ -3,10 +3,11 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
+authors = ["Zoltan Csizmadia"]
 repository = "https://github.com/zcsizmadia/stocktape"
 homepage = "https://github.com/zcsizmadia/stocktape"
 publish = false
@@ -49,3 +50,8 @@ all = { level = "warn", priority = -1 }
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
