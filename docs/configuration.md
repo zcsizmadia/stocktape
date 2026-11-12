@@ -179,6 +179,8 @@ reverse = true          # flow downward instead of upward
 | `strategy` | how quotes are picked: `demo`, `watchlist`, `movers` | `demo` |
 | `content` | `quotes`, `headlines`, `mixed` | `quotes` |
 | `messages` | your own text messages, mixed in now and then | none |
+| `groups` | only these watchlist groups (by title) | all |
+| `symbols` | only these symbols | none |
 
 Unknown keys and bad values are errors that name the banner and key.
 
@@ -202,6 +204,20 @@ skin = "daylight"
 strategy = "watchlist"
 speed = 90
 ```
+
+**Which quotes a line shows:** by default every line uses the whole
+watchlist. A line can be limited to some watchlist groups (by title) or to
+its own list of symbols:
+
+```toml
+[[banner.line]]
+groups = ["Indices"]               # only these [[watchlist]] groups
+[[banner.line]]
+symbols = ["AAPL", "MSFT"]         # only these symbols (wins over groups)
+```
+
+In the settings window, each line has a "Quotes from" row with a checkbox
+per watchlist group and a symbol list. Feeds follow every symbol in use.
 
 Each line is as tall as its skin, and the banner is as tall as its lines
 together (docking reserves the full height). All lines share the banner's
