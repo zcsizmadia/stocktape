@@ -22,7 +22,7 @@ stocktape-platform = { path = "crates/platform" }
 stocktape-ui = { path = "crates/ui" }
 stocktape-config = { path = "crates/config" }
 
-jiff = "0.2"
+jiff = "1.0"
 proptest = "1.12"
 cosmic-text = "0.19"
 tiny-skia = "0.12"
@@ -31,7 +31,7 @@ softbuffer = "0.4"
 toml = "1"
 notify = "8"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
-quick-xml = "0.41"
+quick-xml = "0.42"
 tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
